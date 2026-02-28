@@ -2,11 +2,10 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Calendar, Plus, Trash2, Clock, User, Mail, Loader2,
   AlertCircle, X, Search, FileText, Moon, Sun, 
-  Check, Briefcase, RefreshCw, Info, Phone, Eye, ChevronLeft, ChevronRight, CalendarDays, Repeat
+  Check, Briefcase, RefreshCw, Info, Phone, Eye, ChevronLeft, ChevronRight, CalendarDays, Repeat, Pencil
 } from 'lucide-react';
 
 // --- CONFIGURAÇÃO FIXA ---
-// A URL do n8n fica agora hardcoded para os clientes não terem de a configurar.
 const WEBHOOK_URL = "https://n8n-ouvidoria.tjrr.jus.br/webhook/calendar-api";
 
 // --- HELPERS SEGUROS ---
@@ -59,6 +58,7 @@ export default function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSlotModalOpen, setIsSlotModalOpen] = useState(false);
   const [eventDetailsModal, setEventDetailsModal] = useState(null); 
+  const [editAtendenteModal, setEditAtendenteModal] = useState({ isOpen: false, slotId: null, currentName: '' });
   
   const [darkMode, setDarkMode] = useState(false);
   const [toast, setToast] = useState(null);
@@ -78,8 +78,9 @@ export default function App() {
     endDate: '', 
     weekdays: [1, 2, 3, 4, 5],
     times: [], 
-    atendente: '' 
+    atendentes: [] 
   });
+  const [newAtendente, setNewAtendente] = useState('');
 
   const [progressData, setProgressData] = useState({ active: false, current: 0, total: 0, message: '' });
 
@@ -208,7 +209,7 @@ export default function App() {
     const end = new Date(start.getTime() + 120 * 60000);
 
     const previousSlots = [...safeSlots];
-    setSlots(prev => prev.map(s => s.id === selectedSlotForBooking.id ? { ...s, status: 'Ocupado', nome_cliente: formData.nome, contato_cliente: `${formData.email} | ${formData.telefone}` } : s));
+    setSlots(prev => prev.map(s => s.id === selectedSlotForBooking.id ? { ...s, status: 'Ocupado', nome_cliente: formData.nome, contato_cliente: `${formData.email} | ${formData.telefone}`, assunto: formData.assunto } : s));
     setIsModalOpen(false); 
     
     setProgressData({ active: true, current: 0, total: 1, message: `A agendar ${formData.nome}...` });
@@ -219,8 +220,16 @@ export default function App() {
     });
 
     if (calResult) {
+      // Enviando TODOS os campos para o n8n não sobrescrever com valores vazios
       const sheetResult = await callN8N('update_slot', {
-        id: selectedSlotForBooking.id, status: 'Ocupado', nome_cliente: formData.nome, contato_cliente: `${formData.email} | ${formData.telefone}`
+        id: selectedSlotForBooking.id, 
+        data: selectedSlotForBooking.data || '',
+        horario: selectedSlotForBooking.horario || '',
+        atendente: selectedSlotForBooking.atendente || selectedSlotForBooking.Atendente || '',
+        status: 'Ocupado', 
+        nome_cliente: formData.nome, 
+        contato_cliente: `${formData.email} | ${formData.telefone}`, 
+        assunto: formData.assunto
       });
 
       if (sheetResult) {
@@ -228,11 +237,22 @@ export default function App() {
            setProgressData(p => ({...p, message: "A remover agendamento antigo..."}));
            setEvents(prev => prev.filter(ev => ev.id !== rescheduleData.eventId));
            const oldSlot = safeSlots.find(s => s.contato_cliente && s.contato_cliente.includes(rescheduleData.oldEmail) && s.status === 'Ocupado' && s.id !== selectedSlotForBooking.id);
-           if (oldSlot) setSlots(prev => prev.map(s => s.id === oldSlot.id ? { ...s, status: 'Livre', nome_cliente: '', contato_cliente: '' } : s));
+           
+           if (oldSlot) {
+             setSlots(prev => prev.map(s => s.id === oldSlot.id ? { ...s, status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' } : s));
+             await callN8N('update_slot', { 
+               id: oldSlot.id, 
+               data: oldSlot.data || '',
+               horario: oldSlot.horario || '',
+               atendente: oldSlot.atendente || oldSlot.Atendente || '',
+               status: 'Livre', 
+               nome_cliente: '', 
+               contato_cliente: '', 
+               assunto: '' 
+             });
+           }
 
            await callN8N('delete', { eventId: rescheduleData.eventId });
-           if (oldSlot) await callN8N('update_slot', { id: oldSlot.id, status: 'Livre', nome_cliente: '', contato_cliente: '' });
-
            setRescheduleData({ active: false, eventId: null, oldName: '', oldEmail: '', oldPhone: '' });
            showToast(`Remarcação confirmada!`, "success");
         } else {
@@ -241,7 +261,7 @@ export default function App() {
 
         setSelectedSlotForBooking(null);
         setFormData({ nome: '', email: '', telefone: '', assunto: '' });
-      } else { setSlots(previousSlots); showToast(`Erro ao gravar na planilha.`, "error"); }
+      } else { setSlots(previousSlots); showToast(`Erro ao gravar dados.`, "error"); }
     } else { setSlots(previousSlots); showToast(`Erro ao criar no calendário.`, "error"); }
 
     setProgressData({ active: false, current: 0, total: 0, message: '' });
@@ -262,9 +282,19 @@ export default function App() {
     return dates;
   };
 
+  const handleAddAtendenteToMassSlot = () => {
+    if (newAtendente.trim()) {
+      if (!slotData.atendentes.includes(newAtendente.trim())) {
+        setSlotData(p => ({...p, atendentes: [...p.atendentes, newAtendente.trim()]}));
+      }
+      setNewAtendente('');
+    }
+  };
+
   const handleCreateMassSlots = async (e) => {
     e.preventDefault();
     if (!slotData.startDate) return showToast("Selecione a Data Inicial.", "error");
+    if (slotData.atendentes.length === 0) return showToast("Adicione pelo menos um atendente!", "error");
     if (slotData.times.length === 0) return showToast("Selecione pelo menos um horário!", "error");
     
     const datesToProcess = slotData.endDate 
@@ -275,7 +305,7 @@ export default function App() {
       return showToast("Nenhum dia válido encontrado. Verifique os dias da semana.", "error");
     }
     
-    const totalTasks = datesToProcess.length * slotData.times.length;
+    const totalTasks = datesToProcess.length * slotData.times.length * slotData.atendentes.length;
     let sucessos = 0;
     
     setIsSlotModalOpen(false); 
@@ -288,22 +318,70 @@ export default function App() {
       const formattedData = `${parts[2]}/${parts[1]}/${parts[0]}`; 
       
       for (const time of slotData.times) {
-        sucessos++;
-        setProgressData(prev => ({ ...prev, current: sucessos }));
-        
-        await callN8N('create_slot', { 
-          data: formattedData, 
-          horario: time,
-          atendente: slotData.atendente 
-        });
+        for (const atendente of slotData.atendentes) {
+          sucessos++;
+          setProgressData(prev => ({ ...prev, current: sucessos }));
+          
+          await callN8N('create_slot', { 
+            data: formattedData, 
+            horario: time,
+            atendente: atendente,
+            status: 'Livre',
+            nome_cliente: '',
+            contato_cliente: '',
+            assunto: ''
+          });
+        }
       }
     }
     
     setProgressData({ active: false, current: 0, total: 0, message: '' });
     showToast(`${sucessos} vagas geradas com sucesso!`, "success"); 
-    setSlotData({ startDate: todayStr, endDate: '', weekdays: [1, 2, 3, 4, 5], times: [], atendente: '' });
+    setSlotData({ startDate: todayStr, endDate: '', weekdays: [1, 2, 3, 4, 5], times: [], atendentes: [] });
     setLoading(false);
     fetchData(); 
+  };
+
+  const handleUpdateAtendente = async (e) => {
+    e.preventDefault();
+    if (!editAtendenteModal.slotId) return;
+    
+    setLoading(true);
+    const slotToUpdate = safeSlots.find(s => s.id === editAtendenteModal.slotId);
+    if (!slotToUpdate) {
+      setLoading(false);
+      return showToast("Vaga não encontrada.", "error");
+    }
+
+    const previousSlots = [...safeSlots];
+    // Atualiza otimista na tela
+    setSlots(prev => prev.map(s => s.id === editAtendenteModal.slotId ? { ...s, atendente: editAtendenteModal.currentName, Atendente: editAtendenteModal.currentName } : s));
+    
+    setProgressData({ active: true, current: 0, total: 1, message: 'A atualizar atendente...' });
+    
+    // Passando todos os campos para não apagar o assunto nem nada
+    const res = await callN8N('update_slot', { 
+      id: slotToUpdate.id, 
+      data: slotToUpdate.data || '',
+      horario: slotToUpdate.horario || '',
+      atendente: editAtendenteModal.currentName,
+      status: slotToUpdate.status || 'Livre', 
+      nome_cliente: slotToUpdate.nome_cliente || '', 
+      contato_cliente: slotToUpdate.contato_cliente || '',
+      assunto: slotToUpdate.assunto || ''
+    });
+
+    setProgressData({ active: false, current: 0, total: 0, message: '' });
+    
+    if (res) {
+      showToast("Atendente atualizado com sucesso!", "success");
+      setEditAtendenteModal({ isOpen: false, slotId: null, currentName: '' });
+    } else {
+      setSlots(previousSlots);
+      showToast("Erro ao atualizar atendente na planilha.", "error");
+    }
+    setLoading(false);
+    fetchData();
   };
 
   const toggleTimeSelection = (time) => {
@@ -343,8 +421,17 @@ export default function App() {
       if (eventEmail) {
         const matchingSlot = safeSlots.find(s => s.contato_cliente && s.contato_cliente.includes(eventEmail) && s.status === 'Ocupado');
         if (matchingSlot) {
-          setSlots(prev => prev.map(s => s.id === matchingSlot.id ? { ...s, status: 'Livre', nome_cliente: '', contato_cliente: '' } : s));
-          await callN8N('update_slot', { id: matchingSlot.id, status: 'Livre', nome_cliente: '', contato_cliente: '' });
+          setSlots(prev => prev.map(s => s.id === matchingSlot.id ? { ...s, status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' } : s));
+          await callN8N('update_slot', { 
+            id: matchingSlot.id, 
+            data: matchingSlot.data || '',
+            horario: matchingSlot.horario || '',
+            atendente: matchingSlot.atendente || matchingSlot.Atendente || '',
+            status: 'Livre', 
+            nome_cliente: '', 
+            contato_cliente: '', 
+            assunto: '' 
+          });
         }
       }
       showToast("Cancelado com sucesso!");
@@ -353,9 +440,19 @@ export default function App() {
       const slotToDelete = safeSlots.find(s => s.id === id);
 
       if (slotToDelete?.status === 'Ocupado') {
-        setSlots(prev => prev.map(s => s.id === id ? { ...s, status: 'Livre', nome_cliente: '', contato_cliente: '' } : s));
+        setSlots(prev => prev.map(s => s.id === id ? { ...s, status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' } : s));
         
-        const res = await callN8N('update_slot', { id: id, status: 'Livre', nome_cliente: '', contato_cliente: '' });
+        const res = await callN8N('update_slot', { 
+          id: id, 
+          data: slotToDelete.data || '',
+          horario: slotToDelete.horario || '',
+          atendente: slotToDelete.atendente || slotToDelete.Atendente || '',
+          status: 'Livre', 
+          nome_cliente: '', 
+          contato_cliente: '', 
+          assunto: '' 
+        });
+
         if (!res) { setSlots(prevSlots); setLoading(false); setProgressData({active:false, current:0, total:0, message:''}); return; }
 
         const matchingEvent = safeEvents.find(e => e.attendees?.[0]?.email && slotToDelete.contato_cliente && slotToDelete.contato_cliente.includes(e.attendees[0].email));
@@ -430,7 +527,8 @@ export default function App() {
     const matchesSearch = String(s.horario || '').includes(search) || 
                           String(s.nome_cliente || '').toLowerCase().includes(search) || 
                           String(s.atendente || s.Atendente || '').toLowerCase().includes(search) ||
-                          String(s.contato_cliente || '').toLowerCase().includes(search);
+                          String(s.contato_cliente || '').toLowerCase().includes(search) ||
+                          String(s.assunto || '').toLowerCase().includes(search);
                           
     const parts = String(s.data || '').split('/');
     const slotIso = parts.length === 3 ? `${parts[2]}-${parts[1]}-${parts[0]}` : '';
@@ -456,14 +554,14 @@ export default function App() {
   return (
     <div className={`min-h-screen font-sans transition-colors duration-200 ${darkMode ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-800'}`}>
       
-      {/* HEADER LIMPO (Sem engrenagem de configurações) */}
+      {/* HEADER */}
       <header className={`sticky top-0 z-40 w-full backdrop-blur-xl border-b transition-colors duration-300 ${darkMode ? 'bg-slate-950/80 border-slate-800 shadow-xl shadow-black/20' : 'bg-white/90 border-slate-200 shadow-sm'}`}>
         <div className="max-w-5xl mx-auto px-4 sm:px-5 py-4 sm:py-5 flex items-center justify-between">
           <div className="flex items-center gap-3 sm:gap-4">
             <div className="bg-gradient-to-br from-indigo-500 to-indigo-700 p-2 sm:p-3 rounded-xl sm:rounded-2xl text-white shadow-lg shadow-indigo-500/30">
               <Calendar className="w-5 h-5 sm:w-6 sm:h-6" strokeWidth={2.5} />
             </div>
-            <h1 className="font-black text-xl sm:text-2xl tracking-tight hidden min-[360px]:block">Ouvidoria</h1>
+            <h1 className="font-black text-xl sm:text-2xl tracking-tight hidden min-[360px]:block">Agenda descolada</h1>
           </div>
           
           <div className="flex items-center gap-1 sm:gap-2">
@@ -478,7 +576,7 @@ export default function App() {
 
         <div className="max-w-md mx-auto px-4 pb-4 flex gap-2 mt-1">
           <button onClick={() => setView('sheets')} className={`flex-1 py-2.5 sm:py-3 text-xs sm:text-sm font-bold rounded-xl transition-all duration-300 ${view === 'sheets' ? (darkMode ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'bg-slate-800 text-white shadow-lg shadow-slate-800/20') : (darkMode ? 'bg-slate-900 text-slate-400 hover:bg-slate-800' : 'bg-slate-100 text-slate-500 hover:bg-slate-200')}`}>
-            Vagas da Planilha
+            Vagas
           </button>
           <button onClick={() => setView('calendar')} className={`flex-1 py-2.5 sm:py-3 text-xs sm:text-sm font-bold rounded-xl transition-all duration-300 ${view === 'calendar' ? (darkMode ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'bg-slate-800 text-white shadow-lg shadow-slate-800/20') : (darkMode ? 'bg-slate-900 text-slate-400 hover:bg-slate-800' : 'bg-slate-100 text-slate-500 hover:bg-slate-200')}`}>
             Eventos Agendados
@@ -597,8 +695,19 @@ export default function App() {
                         <Calendar size={16} className="sm:w-5 sm:h-5 shrink-0" /> <span className="truncate">{String(slot?.data || '--/--/----')}</span>
                       </div>
                     )}
-                    <div className={`flex items-center gap-2 sm:gap-3 text-xs sm:text-sm font-bold ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
-                      <Briefcase size={16} className={`sm:w-5 sm:h-5 shrink-0 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`} /> <span className="truncate">{String(slot?.atendente || slot?.Atendente || 'Balcão')}</span>
+                    
+                    <div className="flex items-center justify-between group/atendente">
+                      <div className={`flex items-center gap-2 sm:gap-3 text-xs sm:text-sm font-bold ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                        <Briefcase size={16} className={`sm:w-5 sm:h-5 shrink-0 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`} /> 
+                        <span className="truncate">{String(slot?.atendente || slot?.Atendente || 'Balcão')}</span>
+                      </div>
+                      <button 
+                        onClick={() => setEditAtendenteModal({ isOpen: true, slotId: slot.id, currentName: String(slot?.atendente || slot?.Atendente || '') })}
+                        className={`p-1.5 rounded-lg opacity-100 sm:opacity-0 sm:group-hover/atendente:opacity-100 transition-all ${darkMode ? 'bg-slate-800 text-indigo-400 hover:bg-slate-700' : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'}`}
+                        title="Alterar Atendente"
+                      >
+                        <Pencil size={14} className="sm:w-4 sm:h-4" />
+                      </button>
                     </div>
                     
                     {!isLivre && slot?.nome_cliente && (
@@ -611,6 +720,12 @@ export default function App() {
                           <div className={`flex items-center gap-2 sm:gap-3 text-xs sm:text-sm font-semibold ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
                             <Phone size={14} className="sm:w-4 sm:h-4 shrink-0 opacity-70" />
                             <span className="truncate">{phoneSlot}</span>
+                          </div>
+                        )}
+                        {slot?.assunto && (
+                          <div className={`flex items-start gap-2 sm:gap-3 text-xs sm:text-sm font-semibold mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                            <FileText size={14} className="sm:w-4 sm:h-4 shrink-0 opacity-70 mt-0.5" />
+                            <span className="line-clamp-2">{String(slot.assunto)}</span>
                           </div>
                         )}
                       </div>
@@ -643,6 +758,15 @@ export default function App() {
               const details = extractEventDetails(event);
               const isRemarcacao = details.assunto.toLowerCase().includes('remarcação');
 
+              // Busca a vaga correspondente para exibir o Atendente
+              const eventDateStr = event.start?.dateTime ? String(event.start.dateTime).split('T')[0] : String(event.start?.date);
+              const associatedSlot = safeSlots.find(s => {
+                if (!s.contato_cliente || details.email === 'Não informado' || s.status !== 'Ocupado') return false;
+                const parts = String(s.data || '').split('/');
+                const slotIso = parts.length === 3 ? `${parts[2]}-${parts[1]}-${parts[0]}` : '';
+                return s.contato_cliente.includes(details.email) && slotIso === eventDateStr;
+              });
+
               return (
                 <div key={event?.id ? String(event.id) : `event-${index}`} className={`rounded-2xl sm:rounded-3xl p-5 sm:p-6 border relative transition-all duration-300 ${darkMode ? 'bg-slate-900 border-slate-800 hover:border-slate-700' : 'bg-white border-slate-200 shadow-sm hover:shadow-lg hover:border-indigo-100'}`}>
                   
@@ -664,6 +788,22 @@ export default function App() {
                   </div>
                   
                   <div className="space-y-2.5 sm:space-y-3 mt-4 sm:mt-5 pl-3 sm:pl-4">
+                    {associatedSlot && (
+                      <div className={`flex items-center justify-between group/atendente pb-2 mb-2 border-b border-dashed ${darkMode ? 'border-slate-800' : 'border-slate-200'}`}>
+                        <div className={`flex items-center gap-2 sm:gap-3 font-bold text-xs sm:text-sm ${darkMode ? 'text-indigo-300' : 'text-indigo-700'}`}>
+                          <Briefcase size={16} className={`sm:w-4 sm:h-4 shrink-0`} /> 
+                          <span className="truncate">{String(associatedSlot.atendente || associatedSlot.Atendente || 'Balcão')}</span>
+                        </div>
+                        <button 
+                          onClick={() => setEditAtendenteModal({ isOpen: true, slotId: associatedSlot.id, currentName: String(associatedSlot.atendente || associatedSlot.Atendente || '') })}
+                          className={`p-1.5 rounded-lg opacity-100 sm:opacity-0 sm:group-hover/atendente:opacity-100 transition-all ${darkMode ? 'bg-slate-800 text-indigo-400 hover:bg-slate-700' : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'}`}
+                          title="Alterar Atendente"
+                        >
+                          <Pencil size={14} className="sm:w-4 sm:h-4" />
+                        </button>
+                      </div>
+                    )}
+                    
                     {details.nome && details.nome !== details.assunto && (
                       <div className={`flex items-center gap-2 sm:gap-3 font-bold text-xs sm:text-sm ${darkMode ? 'text-slate-200' : 'text-slate-700'}`}>
                         <User size={16} className={`sm:w-4 sm:h-4 shrink-0 ${darkMode ? 'text-indigo-400' : 'text-indigo-500'}`} /> <span className="truncate">{details.nome}</span>
@@ -805,11 +945,55 @@ export default function App() {
               )}
               
               <div>
-                <label className={`block text-[10px] sm:text-xs font-bold uppercase mb-1.5 sm:mb-2 ml-1 tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Atendente</label>
-                <input required list="atendentes-list" placeholder="Nome do atendente..." className={`w-full px-4 sm:px-5 py-3 sm:py-4 rounded-xl sm:rounded-2xl border text-sm sm:text-base font-bold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-800 focus:border-indigo-500 focus:bg-white'}`} value={slotData.atendente} onChange={e => setSlotData({...slotData, atendente: e.target.value})} />
+                <label className={`block text-[10px] sm:text-xs font-bold uppercase mb-1.5 sm:mb-2 ml-1 tracking-wider flex justify-between items-center ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                  <span>Atendentes (Múltiplos)</span>
+                  <span className="text-indigo-500">{slotData.atendentes.length} adicionado(s)</span>
+                </label>
+                
+                <div className="flex gap-2">
+                  <input 
+                    list="atendentes-list" 
+                    placeholder="Nome do atendente e Enter..." 
+                    className={`flex-1 px-4 sm:px-5 py-3 sm:py-4 rounded-xl sm:rounded-2xl border text-sm sm:text-base font-bold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-800 focus:border-indigo-500 focus:bg-white'}`} 
+                    value={newAtendente} 
+                    onChange={e => setNewAtendente(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault(); // Impede o envio do formulário
+                        handleAddAtendenteToMassSlot();
+                      }
+                    }}
+                  />
+                  <button 
+                    type="button" 
+                    onClick={handleAddAtendenteToMassSlot}
+                    className="bg-indigo-100 text-indigo-700 hover:bg-indigo-200 px-4 sm:px-5 rounded-xl sm:rounded-2xl font-bold transition-colors dark:bg-indigo-500/20 dark:text-indigo-400 dark:hover:bg-indigo-500/30 flex items-center justify-center shrink-0"
+                  >
+                    <Plus size={20} />
+                  </button>
+                </div>
+                
                 <datalist id="atendentes-list">
                   {uniqueAtendentes.map((nome, i) => <option key={`atendente-${i}`} value={nome} />)}
                 </datalist>
+
+                {slotData.atendentes.length > 0 && (
+                  <div className="flex flex-wrap gap-2 mt-3 animate-in fade-in">
+                    {slotData.atendentes.map(atendente => (
+                      <div key={atendente} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${darkMode ? 'bg-slate-800 text-slate-300' : 'bg-white border border-slate-200 shadow-sm text-slate-700'}`}>
+                        <Briefcase size={14} className="opacity-50" />
+                        <span>{atendente}</span>
+                        <button 
+                          type="button" 
+                          onClick={() => setSlotData(p => ({...p, atendentes: p.atendentes.filter(a => a !== atendente)}))}
+                          className="ml-1 p-0.5 rounded-md hover:bg-red-100 hover:text-red-600 dark:hover:bg-red-500/20 dark:hover:text-red-400 transition-colors"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
               
               <div>
@@ -839,8 +1023,40 @@ export default function App() {
                 </div>
               </div>
 
-              <button disabled={loading || slotData.times.length === 0} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-3 sm:py-4 rounded-xl sm:rounded-2xl font-black text-sm sm:text-lg mt-2 sm:mt-4 shadow-lg shadow-indigo-600/30 transition-all flex justify-center items-center gap-2 active:scale-95 disabled:opacity-50 disabled:active:scale-100">
-                {loading ? <Loader2 className="animate-spin" size={20} /> : `Gerar Vagas`}
+              <button disabled={loading || slotData.times.length === 0 || slotData.atendentes.length === 0} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-3 sm:py-4 rounded-xl sm:rounded-2xl font-black text-sm sm:text-lg mt-2 sm:mt-4 shadow-lg shadow-indigo-600/30 transition-all flex justify-center items-center gap-2 active:scale-95 disabled:opacity-50 disabled:active:scale-100">
+                {loading ? <Loader2 className="animate-spin" size={20} /> : `Gerar Vagas (${slotData.times.length * slotData.atendentes.length * (slotData.endDate ? getDatesInRange(slotData.startDate, slotData.endDate, slotData.weekdays).length : 1)} no total)`}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: EDITAR ATENDENTE */}
+      {editAtendenteModal.isOpen && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+          <div className={`w-full max-w-sm p-6 sm:p-8 rounded-[2rem] shadow-2xl animate-in zoom-in-95 duration-200 border ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-white'}`}>
+            <div className="flex justify-between items-center mb-6">
+              <h3 className={`font-black text-xl ${darkMode ? 'text-white' : 'text-slate-800'}`}>Alterar Atendente</h3>
+              <button onClick={() => setEditAtendenteModal({isOpen: false, slotId: null, currentName: ''})} className={`p-2 rounded-full transition-colors ${darkMode ? 'bg-slate-800 text-slate-400 hover:text-white' : 'bg-slate-100 text-slate-500 hover:text-slate-800'}`}><X size={20}/></button>
+            </div>
+            <form onSubmit={handleUpdateAtendente} className="space-y-5">
+              <div>
+                <label className={`block text-[10px] sm:text-xs font-bold uppercase mb-2 ml-1 tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Nome do Atendente</label>
+                <input 
+                  autoFocus
+                  required 
+                  list="atendentes-list-edit"
+                  placeholder="Nome do atendente..."
+                  className={`w-full px-4 py-3 rounded-xl border text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-800 focus:border-indigo-500 focus:bg-white'}`} 
+                  value={editAtendenteModal.currentName} 
+                  onChange={e => setEditAtendenteModal({...editAtendenteModal, currentName: e.target.value})} 
+                />
+                <datalist id="atendentes-list-edit">
+                  {uniqueAtendentes.map((nome, i) => <option key={`edit-atendente-${i}`} value={nome} />)}
+                </datalist>
+              </div>
+              <button disabled={loading} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-3.5 rounded-xl font-black text-sm transition-all flex justify-center items-center gap-2 active:scale-95 disabled:opacity-50">
+                {loading ? <Loader2 className="animate-spin" size={20} /> : 'Salvar Alteração'}
               </button>
             </form>
           </div>
