@@ -26,7 +26,7 @@ const FIREBASE_CONFIG = {
 let app = null, auth = null, db = null, appId = 'escritorio-ouvidoria-tjrr';
 try {
   // 1º Tenta usar a sua configuração manual (Se preencheu a apiKey)
-  if (FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey !== "AIzaSyBqZsc1aPe7-b_f9yXHvpEdWe6BYnjDvGw") {
+  if (FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey !== "COLE_AQUI_API_KEY") {
     app = initializeApp(FIREBASE_CONFIG);
     auth = getAuth(app);
     db = getFirestore(app);
