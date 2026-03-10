@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Calendar, Plus, Trash2, Clock, User, Mail, Loader2,
-  AlertCircle, X, Search, FileText, Moon, Sun, 
-  Check, Briefcase, RefreshCw, Info, Phone, Eye, ChevronLeft, ChevronRight, CalendarDays, Repeat, Pencil
+  AlertCircle, X, Search, FileText, AlertTriangle, Moon, Sun, 
+  Check, Briefcase, RefreshCw, Info, Phone, Eye, ChevronLeft, ChevronRight, CalendarDays, Repeat, Pencil, Lock, LogOut,
+  ShieldAlert, CheckCircle2, XCircle
 } from 'lucide-react';
 
 // --- CONFIGURAÇÃO FIXA ---
@@ -25,7 +26,7 @@ function toRFC3339WithLocalOffset(date) {
 }
 
 const formatPhone = (value) => {
-  let v = value.replace(/\D/g, ''); 
+  let v = String(value || '').replace(/\D/g, ''); 
   if (v.length <= 10) {
     v = v.replace(/^(\d{2})(\d)/g, '($1) $2');
     v = v.replace(/(\d{4})(\d)/, '$1-$2');
@@ -36,7 +37,11 @@ const formatPhone = (value) => {
   return v.slice(0, 15);
 };
 
-const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+// Permite e-mail vazio ou valida formato correto
+const isValidEmail = (email) => {
+  if (!email || email.trim() === '') return true; 
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || ''));
+};
 
 const PREDEFINED_TIMES = [
   '08:00', '08:30', '09:00', '09:30', '10:00', '10:30', '11:00', '11:30', 
@@ -50,6 +55,20 @@ const WEEKDAYS = [
 ];
 
 export default function App() {
+  // === SISTEMA DE AUTENTICAÇÃO E PERFIS ===
+  const [authUser, setAuthUser] = useState(() => {
+    try {
+      const saved = localStorage.getItem('ouvidoria_user');
+      return saved ? JSON.parse(saved) : null;
+    } catch { return null; }
+  });
+  
+  const [loginForm, setLoginForm] = useState({ email: '', senha: '' });
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
+  const isAdmin = authUser?.perfil?.toLowerCase() === 'admin' || String(authUser?.email).toLowerCase().includes('admin');
+
+  // === ESTADOS DA INTERFACE ===
   const [view, setView] = useState('sheets'); 
   const [events, setEvents] = useState([]);
   const [slots, setSlots] = useState([]);
@@ -81,21 +100,19 @@ export default function App() {
     atendentes: [] 
   });
   const [newAtendente, setNewAtendente] = useState('');
-
   const [progressData, setProgressData] = useState({ active: false, current: 0, total: 0, message: '' });
 
   const safeEvents = Array.isArray(events) ? events : [];
   const safeSlots = Array.isArray(slots) ? slots : [];
-
   const uniqueAtendentes = [...new Set(safeSlots.map(s => String(s?.atendente || s?.Atendente || '')).filter(a => a.trim() !== '' && a !== 'undefined' && a !== 'null'))];
 
+  // === FUNÇÕES CORE ===
   const showToast = useCallback((message, type = 'success') => { 
     setToast({ message: String(message), type }); 
     setTimeout(() => setToast(null), 5000); 
   }, []);
 
   const callN8N = useCallback(async (action, payload = {}) => {
-    setLoading(true);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15000); 
 
@@ -108,9 +125,9 @@ export default function App() {
         signal: controller.signal
       });
       clearTimeout(timeoutId);
-
       const data = await res.json().catch(() => null);
 
+      if (res.status === 401) { throw new Error("Acesso Negado. E-mail ou Senha incorretos."); }
       if (!res.ok) {
         if (res.status === 409) { throw new Error(data?.error || "Vaga indisponível ou em conflito."); }
         throw new Error(data?.error || `Erro do Servidor (HTTP ${res.status}).`);
@@ -127,10 +144,33 @@ export default function App() {
         showToast(err.message, "error"); 
       }
       return null; 
-    } finally { setLoading(false); }
+    } 
   }, [showToast]);
 
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    if (!loginForm.email || !loginForm.senha) return showToast("Preencha todos os campos.", "error");
+    
+    setIsLoggingIn(true);
+    const res = await callN8N('login', { email: loginForm.email.trim(), senha: loginForm.senha });
+    setIsLoggingIn(false);
+
+    if (res && res.ok) {
+      setAuthUser(res.user);
+      localStorage.setItem('ouvidoria_user', JSON.stringify(res.user));
+      showToast(`Bem-vindo(a), ${res.user.nome || 'Usuário'}!`, "success");
+    }
+  };
+
+  const handleLogout = () => {
+    setAuthUser(null);
+    localStorage.removeItem('ouvidoria_user');
+    setEvents([]);
+    setSlots([]);
+  };
+
   const fetchData = useCallback(async () => {
+    if (!authUser) return; 
     setLoading(true);
     try {
       const resSlots = await callN8N('list_slots');
@@ -152,10 +192,13 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [callN8N]);
+  }, [callN8N, authUser]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => { 
+    if (authUser) fetchData(); 
+  }, [fetchData, authUser]);
 
+  // --- NAVEGAÇÃO DE DATAS E MODAIS ---
   const shiftDate = (days) => {
     const d = new Date(activeDate + 'T12:00:00'); 
     d.setDate(d.getDate() + days);
@@ -188,7 +231,8 @@ export default function App() {
   const handleSubmitBooking = async (e) => {
     e.preventDefault();
     if (!selectedSlotForBooking) return;
-    if (!isValidEmail(formData.email)) return showToast("E-mail inválido.", "error");
+    
+    if (!isValidEmail(formData.email)) return showToast("E-mail inválido. Deixe em branco ou insira um válido.", "error");
     if (formData.telefone.replace(/\D/g, '').length < 10) return showToast("Telefone incompleto.", "error");
 
     setLoading(true);
@@ -216,39 +260,27 @@ export default function App() {
 
     const calResult = await callN8N('create', { 
       inicio: toRFC3339WithLocalOffset(start), fim: toRFC3339WithLocalOffset(end),
-      nome: formData.nome, email: formData.email, telefone: formData.telefone, assunto: formData.assunto
+      nome: formData.nome, email: formData.email || '', telefone: formData.telefone, assunto: formData.assunto
     });
 
     if (calResult) {
-      // Enviando TODOS os campos para o n8n não sobrescrever com valores vazios
       const sheetResult = await callN8N('update_slot', {
-        id: selectedSlotForBooking.id, 
-        data: selectedSlotForBooking.data || '',
-        horario: selectedSlotForBooking.horario || '',
+        id: selectedSlotForBooking.id, data: selectedSlotForBooking.data || '', horario: selectedSlotForBooking.horario || '',
         atendente: selectedSlotForBooking.atendente || selectedSlotForBooking.Atendente || '',
-        status: 'Ocupado', 
-        nome_cliente: formData.nome, 
-        contato_cliente: `${formData.email} | ${formData.telefone}`, 
-        assunto: formData.assunto
+        status: 'Ocupado', nome_cliente: formData.nome, contato_cliente: `${formData.email || 'Sem e-mail'} | ${formData.telefone}`, assunto: formData.assunto
       });
 
       if (sheetResult) {
         if (rescheduleData.active && rescheduleData.eventId) {
            setProgressData(p => ({...p, message: "A remover agendamento antigo..."}));
            setEvents(prev => prev.filter(ev => ev.id !== rescheduleData.eventId));
-           const oldSlot = safeSlots.find(s => s.contato_cliente && s.contato_cliente.includes(rescheduleData.oldEmail) && s.status === 'Ocupado' && s.id !== selectedSlotForBooking.id);
+           const oldSlot = safeSlots.find(s => s.contato_cliente && s.contato_cliente.includes(rescheduleData.oldEmail || rescheduleData.oldPhone) && s.status === 'Ocupado' && s.id !== selectedSlotForBooking.id);
            
            if (oldSlot) {
              setSlots(prev => prev.map(s => s.id === oldSlot.id ? { ...s, status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' } : s));
              await callN8N('update_slot', { 
-               id: oldSlot.id, 
-               data: oldSlot.data || '',
-               horario: oldSlot.horario || '',
-               atendente: oldSlot.atendente || oldSlot.Atendente || '',
-               status: 'Livre', 
-               nome_cliente: '', 
-               contato_cliente: '', 
-               assunto: '' 
+               id: oldSlot.id, data: oldSlot.data || '', horario: oldSlot.horario || '', atendente: oldSlot.atendente || oldSlot.Atendente || '',
+               status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' 
              });
            }
 
@@ -269,6 +301,30 @@ export default function App() {
     fetchData();
   };
 
+  // --- SELETORES EM MASSA ---
+  const toggleTimeSelection = (time) => {
+    setSlotData(prev => ({
+      ...prev, 
+      times: prev.times.includes(time) ? prev.times.filter(t => t !== time) : [...prev.times, time].sort()
+    }));
+  };
+
+  const toggleWeekday = (id) => {
+    setSlotData(prev => ({
+      ...prev,
+      weekdays: prev.weekdays.includes(id) ? prev.weekdays.filter(d => d !== id) : [...prev.weekdays, id]
+    }));
+  };
+
+  const handleAddAtendenteToMassSlot = () => {
+    if (newAtendente.trim()) {
+      if (!slotData.atendentes.includes(newAtendente.trim())) {
+        setSlotData(p => ({...p, atendentes: [...p.atendentes, newAtendente.trim()]}));
+      }
+      setNewAtendente('');
+    }
+  };
+
   const getDatesInRange = (start, end, weekdays) => {
     let current = new Date(start + 'T12:00:00');
     const endDate = new Date(end + 'T12:00:00');
@@ -282,15 +338,6 @@ export default function App() {
     return dates;
   };
 
-  const handleAddAtendenteToMassSlot = () => {
-    if (newAtendente.trim()) {
-      if (!slotData.atendentes.includes(newAtendente.trim())) {
-        setSlotData(p => ({...p, atendentes: [...p.atendentes, newAtendente.trim()]}));
-      }
-      setNewAtendente('');
-    }
-  };
-
   const handleCreateMassSlots = async (e) => {
     e.preventDefault();
     if (!slotData.startDate) return showToast("Selecione a Data Inicial.", "error");
@@ -301,16 +348,13 @@ export default function App() {
       ? getDatesInRange(slotData.startDate, slotData.endDate, slotData.weekdays) 
       : [slotData.startDate];
 
-    if (datesToProcess.length === 0) {
-      return showToast("Nenhum dia válido encontrado. Verifique os dias da semana.", "error");
-    }
+    if (datesToProcess.length === 0) return showToast("Nenhum dia válido encontrado.", "error");
     
     const totalTasks = datesToProcess.length * slotData.times.length * slotData.atendentes.length;
     let sucessos = 0;
     
     setIsSlotModalOpen(false); 
     setLoading(true);
-    
     setProgressData({ active: true, current: 0, total: totalTasks, message: 'A criar vagas no sistema...' });
     
     for (const dateIso of datesToProcess) {
@@ -321,15 +365,9 @@ export default function App() {
         for (const atendente of slotData.atendentes) {
           sucessos++;
           setProgressData(prev => ({ ...prev, current: sucessos }));
-          
           await callN8N('create_slot', { 
-            data: formattedData, 
-            horario: time,
-            atendente: atendente,
-            status: 'Livre',
-            nome_cliente: '',
-            contato_cliente: '',
-            assunto: ''
+            data: formattedData, horario: time, atendente: atendente,
+            status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: ''
           });
         }
       }
@@ -354,21 +392,14 @@ export default function App() {
     }
 
     const previousSlots = [...safeSlots];
-    // Atualiza otimista na tela
     setSlots(prev => prev.map(s => s.id === editAtendenteModal.slotId ? { ...s, atendente: editAtendenteModal.currentName, Atendente: editAtendenteModal.currentName } : s));
     
     setProgressData({ active: true, current: 0, total: 1, message: 'A atualizar atendente...' });
     
-    // Passando todos os campos para não apagar o assunto nem nada
     const res = await callN8N('update_slot', { 
-      id: slotToUpdate.id, 
-      data: slotToUpdate.data || '',
-      horario: slotToUpdate.horario || '',
-      atendente: editAtendenteModal.currentName,
-      status: slotToUpdate.status || 'Livre', 
-      nome_cliente: slotToUpdate.nome_cliente || '', 
-      contato_cliente: slotToUpdate.contato_cliente || '',
-      assunto: slotToUpdate.assunto || ''
+      id: slotToUpdate.id, data: slotToUpdate.data || '', horario: slotToUpdate.horario || '',
+      atendente: editAtendenteModal.currentName, status: slotToUpdate.status || 'Livre', 
+      nome_cliente: slotToUpdate.nome_cliente || '', contato_cliente: slotToUpdate.contato_cliente || '', assunto: slotToUpdate.assunto || ''
     });
 
     setProgressData({ active: false, current: 0, total: 0, message: '' });
@@ -378,33 +409,70 @@ export default function App() {
       setEditAtendenteModal({ isOpen: false, slotId: null, currentName: '' });
     } else {
       setSlots(previousSlots);
-      showToast("Erro ao atualizar atendente na planilha.", "error");
+      showToast("Erro ao atualizar atendente.", "error");
     }
     setLoading(false);
     fetchData();
   };
 
-  const toggleTimeSelection = (time) => {
-    setSlotData(prev => ({
-      ...prev, 
-      times: prev.times.includes(time) ? prev.times.filter(t => t !== time) : [...prev.times, time].sort()
-    }));
+  // --- LÓGICA DE EXCLUSÃO (Com Regras de Perfil) ---
+  const handleRequestDelete = async (id, type) => {
+    setDeleteConfirm({ isOpen: false, id: null, title: '', type: 'event' }); 
+    setProgressData({ active: true, current: 0, total: 1, message: 'A enviar solicitação de exclusão...' });
+
+    let slotToUpdate = null;
+    if (type === 'event') {
+      const eventToDelete = safeEvents.find(e => e.id === id);
+      const eventEmail = eventToDelete?.attendees?.[0]?.email;
+      slotToUpdate = safeSlots.find(s => s.contato_cliente && (s.contato_cliente.includes(eventEmail) || s.contato_cliente.includes(eventToDelete.summary)) && s.status === 'Ocupado');
+    } else {
+      slotToUpdate = safeSlots.find(s => s.id === id);
+    }
+
+    if (slotToUpdate) {
+      const res = await callN8N('update_slot', { 
+        id: slotToUpdate.id, data: slotToUpdate.data || '', horario: slotToUpdate.horario || '',
+        atendente: slotToUpdate.atendente || slotToUpdate.Atendente || '', 
+        status: 'Pendente Exclusão', 
+        nome_cliente: slotToUpdate.nome_cliente, contato_cliente: slotToUpdate.contato_cliente, assunto: slotToUpdate.assunto 
+      });
+      
+      if (res) showToast("Solicitação de exclusão enviada ao administrador!", "success");
+      else showToast("Erro ao enviar solicitação.", "error");
+    } else {
+      showToast("Vaga não encontrada para solicitação.", "error");
+    }
+    
+    setProgressData({ active: false, current: 0, total: 0, message: '' });
+    fetchData();
   };
 
-  const toggleWeekday = (id) => {
-    setSlotData(prev => ({
-      ...prev,
-      weekdays: prev.weekdays.includes(id) ? prev.weekdays.filter(d => d !== id) : [...prev.weekdays, id]
-    }));
+  const handleRejectDeletion = async (slotId) => {
+    const slotToUpdate = safeSlots.find(s => s.id === slotId);
+    if (!slotToUpdate) return;
+    
+    setProgressData({ active: true, current: 0, total: 1, message: 'A rejeitar exclusão...' });
+
+    const res = await callN8N('update_slot', { 
+      id: slotToUpdate.id, data: slotToUpdate.data || '', horario: slotToUpdate.horario || '',
+      atendente: slotToUpdate.atendente || slotToUpdate.Atendente || '', 
+      status: 'Ocupado', 
+      nome_cliente: slotToUpdate.nome_cliente, contato_cliente: slotToUpdate.contato_cliente, assunto: slotToUpdate.assunto 
+    });
+
+    setProgressData({ active: false, current: 0, total: 0, message: '' });
+    if (res) showToast("Exclusão rejeitada. A vaga foi mantida.", "info");
+    fetchData();
   };
 
   const handleDelete = async (id, type) => {
+    if (!isAdmin) return handleRequestDelete(id, type);
+
     if (!id) return;
     setDeleteConfirm({ isOpen: false, id: null, title: '', type: 'event' }); 
 
     const prevEvents = [...safeEvents];
     const prevSlots = [...safeSlots];
-    setLoading(true);
     setProgressData({ active: true, current: 0, total: 1, message: 'A processar exclusão...' });
 
     if (type === 'event') {
@@ -412,65 +480,51 @@ export default function App() {
       const eventEmail = eventToDelete?.attendees?.[0]?.email;
 
       setEvents(prev => prev.filter(e => e.id !== id));
-      
       const res = await callN8N('delete', { eventId: id });
-      if (!res) { 
-        setEvents(prevEvents); setLoading(false); setProgressData({active:false, current:0, total:0, message:''}); return; 
-      }
+      if (!res) { setEvents(prevEvents); setProgressData({active:false, current:0, total:0, message:''}); return; }
 
-      if (eventEmail) {
-        const matchingSlot = safeSlots.find(s => s.contato_cliente && s.contato_cliente.includes(eventEmail) && s.status === 'Ocupado');
-        if (matchingSlot) {
-          setSlots(prev => prev.map(s => s.id === matchingSlot.id ? { ...s, status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' } : s));
-          await callN8N('update_slot', { 
-            id: matchingSlot.id, 
-            data: matchingSlot.data || '',
-            horario: matchingSlot.horario || '',
-            atendente: matchingSlot.atendente || matchingSlot.Atendente || '',
-            status: 'Livre', 
-            nome_cliente: '', 
-            contato_cliente: '', 
-            assunto: '' 
-          });
-        }
+      // Procura a vaga para libertar pelo email ou, na falta dele, pelo resumo
+      const matchingSlot = safeSlots.find(s => 
+        s.contato_cliente && 
+        (s.contato_cliente.includes(eventEmail) || (eventToDelete.summary && s.contato_cliente.includes(eventToDelete.summary))) && 
+        (s.status === 'Ocupado' || s.status === 'Pendente Exclusão')
+      );
+
+      if (matchingSlot) {
+        setSlots(prev => prev.map(s => s.id === matchingSlot.id ? { ...s, status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' } : s));
+        await callN8N('update_slot', { 
+          id: matchingSlot.id, data: matchingSlot.data || '', horario: matchingSlot.horario || '',
+          atendente: matchingSlot.atendente || matchingSlot.Atendente || '', status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' 
+        });
       }
-      showToast("Cancelado com sucesso!");
+      showToast("Agendamento excluído definitivamente!");
 
     } else if (type === 'slot') {
       const slotToDelete = safeSlots.find(s => s.id === id);
 
-      if (slotToDelete?.status === 'Ocupado') {
+      if (slotToDelete?.status === 'Ocupado' || slotToDelete?.status === 'Pendente Exclusão') {
         setSlots(prev => prev.map(s => s.id === id ? { ...s, status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' } : s));
         
         const res = await callN8N('update_slot', { 
-          id: id, 
-          data: slotToDelete.data || '',
-          horario: slotToDelete.horario || '',
-          atendente: slotToDelete.atendente || slotToDelete.Atendente || '',
-          status: 'Livre', 
-          nome_cliente: '', 
-          contato_cliente: '', 
-          assunto: '' 
+          id: id, data: slotToDelete.data || '', horario: slotToDelete.horario || '',
+          atendente: slotToDelete.atendente || slotToDelete.Atendente || '', status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' 
         });
-
-        if (!res) { setSlots(prevSlots); setLoading(false); setProgressData({active:false, current:0, total:0, message:''}); return; }
+        if (!res) { setSlots(prevSlots); setProgressData({active:false, current:0, total:0, message:''}); return; }
 
         const matchingEvent = safeEvents.find(e => e.attendees?.[0]?.email && slotToDelete.contato_cliente && slotToDelete.contato_cliente.includes(e.attendees[0].email));
         if (matchingEvent) {
           setEvents(prev => prev.filter(e => e.id !== matchingEvent.id));
           await callN8N('delete', { eventId: matchingEvent.id });
         }
-        showToast("Vaga libertada!");
+        showToast("Vaga libertada com sucesso!");
       } else {
         setSlots(prev => prev.map(s => s.id === id ? { ...s, status: 'Excluído' } : s));
-        
         const res = await callN8N('delete_slot', { id });
-        if (!res) { setSlots(prevSlots); setLoading(false); setProgressData({active:false, current:0, total:0, message:''}); return; } 
-        showToast("Vaga removida da grelha.");
+        if (!res) { setSlots(prevSlots); setProgressData({active:false, current:0, total:0, message:''}); return; } 
+        showToast("Vaga removida definitivamente da grelha.");
       }
     }
     setProgressData({ active: false, current: 0, total: 0, message: '' });
-    setLoading(false);
   };
 
   const handleReschedule = () => {
@@ -507,7 +561,6 @@ export default function App() {
 
   const filteredEvents = safeEvents.filter(e => {
     if (!e || typeof e !== 'object' || e.status === 'cancelled') return false;
-    
     const search = String(searchTerm || '').toLowerCase();
     const summary = String(e.summary || '').toLowerCase();
     const matchesSearch = summary.includes(search);
@@ -522,7 +575,6 @@ export default function App() {
 
   const filteredSlots = safeSlots.filter(s => {
     if (!s || typeof s !== 'object' || s.status === 'Excluído') return false;
-    
     const search = String(searchTerm || '').toLowerCase();
     const matchesSearch = String(s.horario || '').includes(search) || 
                           String(s.nome_cliente || '').toLowerCase().includes(search) || 
@@ -551,32 +603,109 @@ export default function App() {
     };
   };
 
+  // ==========================================
+  // ECRÃ DE LOGIN
+  // ==========================================
+  if (!authUser) {
+    return (
+      <div className={`min-h-screen flex items-center justify-center p-4 transition-colors duration-300 ${darkMode ? 'bg-slate-950 text-white' : 'bg-slate-50 text-slate-900'}`}>
+        <div className="absolute top-6 right-6">
+           <button onClick={() => setDarkMode(!darkMode)} className={`p-3 rounded-full transition-colors ${darkMode ? 'bg-slate-800 text-amber-400 hover:bg-slate-700' : 'bg-white text-indigo-600 shadow-md hover:bg-slate-50'}`}>
+              {darkMode ? <Sun size={24} /> : <Moon size={24} />}
+           </button>
+        </div>
+        
+        <div className={`w-full max-w-md p-8 sm:p-10 rounded-[2.5rem] shadow-2xl animate-in zoom-in-95 duration-500 border ${darkMode ? 'bg-slate-900 border-slate-800 shadow-black/50' : 'bg-white border-white'}`}>
+          <div className="flex flex-col items-center text-center mb-10">
+             <div className="bg-gradient-to-br from-indigo-500 to-indigo-700 p-4 rounded-2xl text-white shadow-xl shadow-indigo-500/30 mb-6">
+                <Lock size={36} strokeWidth={2.5} />
+             </div>
+             <h1 className="font-black text-3xl tracking-tight mb-2">Acesso Restrito</h1>
+             <p className={`text-sm font-medium ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+               Faça login para gerir as vagas da Ouvidoria.
+             </p>
+          </div>
+
+          <form onSubmit={handleLogin} className="space-y-6">
+            <div>
+              <label className={`block text-xs font-bold uppercase tracking-widest mb-2 ml-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>E-mail do Utilizador</label>
+              <div className="relative">
+                <User className={`absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`} />
+                <input 
+                  required type="email" placeholder="admin@tjrr.jus.br" 
+                  value={loginForm.email} onChange={e => setLoginForm({...loginForm, email: e.target.value})}
+                  className={`w-full pl-12 pr-4 py-4 rounded-2xl border text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-900 focus:border-indigo-500 focus:bg-white'}`} 
+                />
+              </div>
+            </div>
+            
+            <div>
+              <label className={`block text-xs font-bold uppercase tracking-widest mb-2 ml-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Senha de Acesso</label>
+              <div className="relative">
+                <Lock className={`absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`} />
+                <input 
+                  required type="password" placeholder="••••••" 
+                  value={loginForm.senha} onChange={e => setLoginForm({...loginForm, senha: e.target.value})}
+                  className={`w-full pl-12 pr-4 py-4 rounded-2xl border text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-900 focus:border-indigo-500 focus:bg-white'}`} 
+                />
+              </div>
+            </div>
+
+            <button disabled={isLoggingIn} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-4 rounded-2xl font-black text-lg mt-4 shadow-xl shadow-indigo-600/30 transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-70">
+              {isLoggingIn ? <Loader2 className="animate-spin" size={24} /> : 'Entrar no Sistema'}
+            </button>
+          </form>
+        </div>
+
+        {toast && (
+          <div className={`fixed top-6 left-1/2 -translate-x-1/2 px-6 py-4 rounded-2xl shadow-2xl z-[100] animate-in slide-in-from-top-4 flex items-center gap-3 text-sm font-bold whitespace-nowrap border max-w-[90vw] ${toast.type === 'error' ? (darkMode ? 'bg-red-950/90 text-red-400 border-red-900' : 'bg-red-50 text-red-600 border-red-200') : (darkMode ? 'bg-emerald-950/90 text-emerald-400 border-emerald-900' : 'bg-emerald-50 text-emerald-600 border-emerald-200')}`}>
+            {toast.type === 'error' ? <AlertCircle size={20} /> : <Check size={20} />}
+            <span className="truncate">{toast.message}</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ==========================================
+  // ECRÃ PRINCIPAL (Utilizador Autenticado)
+  // ==========================================
   return (
     <div className={`min-h-screen font-sans transition-colors duration-200 ${darkMode ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-800'}`}>
       
-      {/* HEADER */}
       <header className={`sticky top-0 z-40 w-full backdrop-blur-xl border-b transition-colors duration-300 ${darkMode ? 'bg-slate-950/80 border-slate-800 shadow-xl shadow-black/20' : 'bg-white/90 border-slate-200 shadow-sm'}`}>
         <div className="max-w-5xl mx-auto px-4 sm:px-5 py-4 sm:py-5 flex items-center justify-between">
           <div className="flex items-center gap-3 sm:gap-4">
             <div className="bg-gradient-to-br from-indigo-500 to-indigo-700 p-2 sm:p-3 rounded-xl sm:rounded-2xl text-white shadow-lg shadow-indigo-500/30">
               <Calendar className="w-5 h-5 sm:w-6 sm:h-6" strokeWidth={2.5} />
             </div>
-            <h1 className="font-black text-xl sm:text-2xl tracking-tight hidden min-[360px]:block">Agenda descolada</h1>
+            <h1 className="font-black text-xl sm:text-2xl tracking-tight hidden min-[360px]:block">Agenda Descolada</h1>
           </div>
           
           <div className="flex items-center gap-1 sm:gap-2">
-            <button onClick={() => {fetchData(); showToast("A atualizar...");}} className={`p-2 sm:p-2.5 rounded-full transition-colors ${darkMode ? 'text-slate-300 hover:bg-slate-800' : 'text-slate-500 hover:bg-slate-100'}`}>
+            <div className={`hidden md:flex items-center gap-2 px-4 py-2 rounded-xl mr-2 font-bold text-sm border ${darkMode ? 'bg-slate-900 border-slate-800 text-slate-300' : 'bg-white border-slate-200 text-slate-600 shadow-sm'}`}>
+              <User size={16} className={isAdmin ? "text-amber-500" : "text-indigo-500"} />
+              <span className="flex flex-col items-start leading-none">
+                <span>{authUser.nome || authUser.email}</span>
+                {isAdmin && <span className="text-[10px] text-amber-500 uppercase tracking-widest mt-0.5">Administrador</span>}
+              </span>
+            </div>
+
+            <button onClick={() => {fetchData(); showToast("A atualizar...");}} className={`p-2 sm:p-2.5 rounded-full transition-colors ${darkMode ? 'text-slate-300 hover:bg-slate-800' : 'text-slate-500 hover:bg-slate-100'}`} title="Atualizar Dados">
               <RefreshCw className={`w-5 h-5 sm:w-6 sm:h-6 ${loading ? 'animate-spin text-indigo-500' : ''}`} />
             </button>
-            <button onClick={() => setDarkMode(!darkMode)} className={`p-2 sm:p-2.5 rounded-full transition-colors ${darkMode ? 'text-amber-400 hover:bg-slate-800' : 'text-indigo-600 hover:bg-slate-100'}`}>
+            <button onClick={() => setDarkMode(!darkMode)} className={`p-2 sm:p-2.5 rounded-full transition-colors ${darkMode ? 'text-amber-400 hover:bg-slate-800' : 'text-indigo-600 hover:bg-slate-100'}`} title="Alternar Tema">
               {darkMode ? <Sun className="w-5 h-5 sm:w-6 sm:h-6" /> : <Moon className="w-5 h-5 sm:w-6 sm:h-6" />}
+            </button>
+            <button onClick={handleLogout} className={`p-2 sm:p-2.5 rounded-full transition-colors ${darkMode ? 'text-red-400 hover:bg-red-950/50' : 'text-red-500 hover:bg-red-50'}`} title="Sair do Sistema">
+              <LogOut className="w-5 h-5 sm:w-6 sm:h-6" />
             </button>
           </div>
         </div>
 
         <div className="max-w-md mx-auto px-4 pb-4 flex gap-2 mt-1">
           <button onClick={() => setView('sheets')} className={`flex-1 py-2.5 sm:py-3 text-xs sm:text-sm font-bold rounded-xl transition-all duration-300 ${view === 'sheets' ? (darkMode ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'bg-slate-800 text-white shadow-lg shadow-slate-800/20') : (darkMode ? 'bg-slate-900 text-slate-400 hover:bg-slate-800' : 'bg-slate-100 text-slate-500 hover:bg-slate-200')}`}>
-            Vagas
+            Vagas da Planilha
           </button>
           <button onClick={() => setView('calendar')} className={`flex-1 py-2.5 sm:py-3 text-xs sm:text-sm font-bold rounded-xl transition-all duration-300 ${view === 'calendar' ? (darkMode ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'bg-slate-800 text-white shadow-lg shadow-slate-800/20') : (darkMode ? 'bg-slate-900 text-slate-400 hover:bg-slate-800' : 'bg-slate-100 text-slate-500 hover:bg-slate-200')}`}>
             Eventos Agendados
@@ -641,7 +770,7 @@ export default function App() {
                      className={`w-full pl-10 sm:pl-12 pr-3 sm:pr-4 py-3 sm:py-4 rounded-xl sm:rounded-2xl border text-xs sm:text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-900 border-slate-800 text-white placeholder-slate-500 focus:border-indigo-500' : 'bg-white border-slate-200 text-slate-800 focus:border-indigo-400 shadow-sm'}`} />
             </div>
             
-            {view === 'sheets' && (
+            {view === 'sheets' && isAdmin && (
               <button onClick={() => setIsSlotModalOpen(true)} className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 sm:px-5 py-3 sm:py-4 rounded-xl sm:rounded-2xl font-bold text-sm shadow-lg shadow-indigo-600/30 transition-all flex items-center justify-center gap-2 whitespace-nowrap shrink-0 active:scale-95">
                 <Plus size={20} strokeWidth={3} /> <span className="hidden sm:inline">Gerar Vagas</span>
               </button>
@@ -657,7 +786,7 @@ export default function App() {
                  <p className={`font-semibold text-base sm:text-lg ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
                    {isSearching ? 'Nenhuma vaga encontrada para esta pesquisa.' : 'O dia está vazio. Nenhuma vaga criada.'}
                  </p>
-                 {!isSearching && (
+                 {!isSearching && isAdmin && (
                    <button onClick={() => setIsSlotModalOpen(true)} className="mt-4 sm:mt-6 font-bold text-indigo-500 hover:underline">Criar vagas para este dia</button>
                  )}
                </div>
@@ -665,27 +794,36 @@ export default function App() {
             
             {filteredSlots.map((slot, index) => {
               const isLivre = slot?.status === 'Livre';
+              const isPendente = slot?.status === 'Pendente Exclusão';
+              
               const contactInfo = String(slot.contato_cliente || '');
               const [emailSlot, phoneSlot] = contactInfo.includes('|') ? contactInfo.split('|').map(s => s.trim()) : [contactInfo, ''];
 
               return (
-                <div key={slot?.id ? String(slot.id) : `slot-${index}`} className={`rounded-2xl sm:rounded-3xl p-5 sm:p-6 border relative transition-all duration-300 group ${darkMode ? 'bg-slate-900 border-slate-800 hover:border-slate-700' : 'bg-white border-slate-200 shadow-sm hover:shadow-lg hover:border-indigo-100'}`}>
+                <div key={slot?.id ? String(slot.id) : `slot-${index}`} className={`rounded-2xl sm:rounded-3xl p-5 sm:p-6 border relative transition-all duration-300 group overflow-hidden ${darkMode ? 'bg-slate-900 border-slate-800 hover:border-slate-700' : 'bg-white border-slate-200 shadow-sm hover:shadow-lg'} ${isPendente ? (darkMode ? 'border-red-900/50 shadow-[0_0_15px_rgba(239,68,68,0.1)]' : 'border-red-200 shadow-red-500/10') : ''}`}>
                   
+                  {isPendente && (
+                     <div className="absolute top-0 left-0 w-full h-1 bg-red-500"></div>
+                  )}
+
                   <div className="flex justify-between items-start mb-4 sm:mb-5">
                     <div className="flex items-center gap-2 sm:gap-3">
-                      <div className={`p-2 sm:p-2.5 rounded-xl ${isLivre ? (darkMode ? 'bg-indigo-500/20 text-indigo-400' : 'bg-indigo-100 text-indigo-600') : (darkMode ? 'bg-orange-500/20 text-orange-400' : 'bg-orange-100 text-orange-600')}`}>
+                      <div className={`p-2 sm:p-2.5 rounded-xl ${isLivre ? (darkMode ? 'bg-indigo-500/20 text-indigo-400' : 'bg-indigo-100 text-indigo-600') : (isPendente ? (darkMode ? 'bg-red-500/20 text-red-400' : 'bg-red-100 text-red-600') : (darkMode ? 'bg-orange-500/20 text-orange-400' : 'bg-orange-100 text-orange-600'))}`}>
                         <Clock size={20} strokeWidth={2.5} className="sm:w-6 sm:h-6" />
                       </div>
                       <span className={`font-black text-2xl sm:text-3xl tracking-tight ${darkMode ? 'text-white' : 'text-slate-800'}`}>{String(slot?.horario || '--:--')}</span>
                     </div>
                     
                     <div className="flex items-center gap-1.5 sm:gap-2">
-                      <span className={`text-[9px] sm:text-[10px] font-black px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-lg uppercase tracking-widest ${isLivre ? (darkMode ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-emerald-100 text-emerald-700 border border-emerald-200') : (darkMode ? 'bg-orange-500/20 text-orange-400 border border-orange-500/30' : 'bg-orange-100 text-orange-700 border border-orange-200')}`}>
-                        {String(slot?.status || 'N/D')}
+                      <span className={`text-[9px] sm:text-[10px] font-black px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-lg uppercase tracking-widest ${isLivre ? (darkMode ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-emerald-100 text-emerald-700 border border-emerald-200') : (isPendente ? (darkMode ? 'bg-red-500/20 text-red-400 border border-red-500/30' : 'bg-red-100 text-red-700 border border-red-200') : (darkMode ? 'bg-orange-500/20 text-orange-400 border border-orange-500/30' : 'bg-orange-100 text-orange-700 border border-orange-200'))}`}>
+                        {isPendente ? (isAdmin ? 'APROVAR EXCLUSÃO' : 'AGUARDA EXCLUSÃO') : String(slot?.status || 'N/D')}
                       </span>
-                      <button onClick={() => setDeleteConfirm({ isOpen: true, id: slot?.id, title: `${slot?.data} às ${slot?.horario}`, type: 'slot' })} className={`p-1.5 sm:p-2 rounded-lg transition-colors ${darkMode ? 'text-slate-600 hover:text-red-400 hover:bg-red-500/10' : 'text-slate-300 hover:text-red-500 hover:bg-red-50'}`}>
-                        <Trash2 size={16} className="sm:w-5 sm:h-5" />
-                      </button>
+                      
+                      {!isPendente && (
+                        <button onClick={() => setDeleteConfirm({ isOpen: true, id: slot?.id, title: `${slot?.data} às ${slot?.horario}`, type: 'slot' })} className={`p-1.5 sm:p-2 rounded-lg transition-colors ${darkMode ? 'text-slate-600 hover:text-red-400 hover:bg-red-500/10' : 'text-slate-300 hover:text-red-500 hover:bg-red-50'}`} title={isAdmin ? "Remover" : "Solicitar Exclusão"}>
+                          {isAdmin ? <Trash2 size={16} className="sm:w-5 sm:h-5" /> : <ShieldAlert size={16} className="sm:w-5 sm:h-5" />}
+                        </button>
+                      )}
                     </div>
                   </div>
                   
@@ -701,19 +839,21 @@ export default function App() {
                         <Briefcase size={16} className={`sm:w-5 sm:h-5 shrink-0 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`} /> 
                         <span className="truncate">{String(slot?.atendente || slot?.Atendente || 'Balcão')}</span>
                       </div>
-                      <button 
-                        onClick={() => setEditAtendenteModal({ isOpen: true, slotId: slot.id, currentName: String(slot?.atendente || slot?.Atendente || '') })}
-                        className={`p-1.5 rounded-lg opacity-100 sm:opacity-0 sm:group-hover/atendente:opacity-100 transition-all ${darkMode ? 'bg-slate-800 text-indigo-400 hover:bg-slate-700' : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'}`}
-                        title="Alterar Atendente"
-                      >
-                        <Pencil size={14} className="sm:w-4 sm:h-4" />
-                      </button>
+                      {isAdmin && (
+                        <button 
+                          onClick={() => setEditAtendenteModal({ isOpen: true, slotId: slot.id, currentName: String(slot?.atendente || slot?.Atendente || '') })}
+                          className={`p-1.5 rounded-lg opacity-100 sm:opacity-0 sm:group-hover/atendente:opacity-100 transition-all ${darkMode ? 'bg-slate-800 text-indigo-400 hover:bg-slate-700' : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'}`}
+                          title="Alterar Atendente"
+                        >
+                          <Pencil size={14} className="sm:w-4 sm:h-4" />
+                        </button>
+                      )}
                     </div>
                     
-                    {!isLivre && slot?.nome_cliente && (
+                    {(!isLivre) && slot?.nome_cliente && (
                       <div className={`pt-3 sm:pt-4 mt-3 sm:mt-4 border-t space-y-2 sm:space-y-3 ${darkMode ? 'border-slate-800' : 'border-slate-100'}`}>
                         <div className={`flex items-center gap-2 sm:gap-3 font-black text-sm sm:text-base ${darkMode ? 'text-white' : 'text-slate-800'}`}>
-                          <User size={16} className={`sm:w-5 sm:h-5 shrink-0 ${darkMode ? 'text-orange-400' : 'text-orange-500'}`} />
+                          <User size={16} className={`sm:w-5 sm:h-5 shrink-0 ${isPendente ? 'text-red-500' : (darkMode ? 'text-orange-400' : 'text-orange-500')}`} />
                           <span className="truncate">{String(slot.nome_cliente)}</span>
                         </div>
                         {phoneSlot && phoneSlot !== 'Não informado' && phoneSlot !== 'undefined' && (
@@ -737,6 +877,18 @@ export default function App() {
                       {rescheduleData.active ? 'Confirmar Remarcação' : 'Agendar Atendimento'}
                     </button>
                   )}
+
+                  {/* ADMIN: BOTÕES DE APROVAÇÃO DE EXCLUSÃO */}
+                  {isPendente && isAdmin && (
+                     <div className="flex gap-2 mt-4 pt-4 border-t border-red-500/20">
+                        <button onClick={() => handleDelete(slot.id, 'slot')} className="flex-1 bg-red-600 hover:bg-red-500 text-white py-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-red-600/20 active:scale-95">
+                           <CheckCircle2 size={16}/> Aprovar
+                        </button>
+                        <button onClick={() => handleRejectDeletion(slot.id)} className={`flex-1 py-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95 ${darkMode ? 'bg-slate-800 text-slate-300 hover:bg-slate-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                           <XCircle size={16}/> Rejeitar
+                        </button>
+                     </div>
+                  )}
                 </div>
               );
             })}
@@ -758,19 +910,25 @@ export default function App() {
               const details = extractEventDetails(event);
               const isRemarcacao = details.assunto.toLowerCase().includes('remarcação');
 
-              // Busca a vaga correspondente para exibir o Atendente
               const eventDateStr = event.start?.dateTime ? String(event.start.dateTime).split('T')[0] : String(event.start?.date);
+              
               const associatedSlot = safeSlots.find(s => {
-                if (!s.contato_cliente || details.email === 'Não informado' || s.status !== 'Ocupado') return false;
+                // Modificado para usar nome ou email já que o email agora é opcional
+                if (!s.contato_cliente || (details.email === 'Não informado' && details.nome === '')) return false;
+                if (s.status !== 'Ocupado' && s.status !== 'Pendente Exclusão') return false;
                 const parts = String(s.data || '').split('/');
                 const slotIso = parts.length === 3 ? `${parts[2]}-${parts[1]}-${parts[0]}` : '';
-                return s.contato_cliente.includes(details.email) && slotIso === eventDateStr;
+                return (s.contato_cliente.includes(details.email) || s.contato_cliente.includes(details.nome)) && slotIso === eventDateStr;
               });
 
+              const isPendente = associatedSlot?.status === 'Pendente Exclusão';
+
               return (
-                <div key={event?.id ? String(event.id) : `event-${index}`} className={`rounded-2xl sm:rounded-3xl p-5 sm:p-6 border relative transition-all duration-300 ${darkMode ? 'bg-slate-900 border-slate-800 hover:border-slate-700' : 'bg-white border-slate-200 shadow-sm hover:shadow-lg hover:border-indigo-100'}`}>
+                <div key={event?.id ? String(event.id) : `event-${index}`} className={`rounded-2xl sm:rounded-3xl p-5 sm:p-6 border relative transition-all duration-300 ${darkMode ? 'bg-slate-900 border-slate-800 hover:border-slate-700' : 'bg-white border-slate-200 shadow-sm hover:shadow-lg'} ${isPendente ? (darkMode ? 'border-red-900/50 shadow-[0_0_15px_rgba(239,68,68,0.1)]' : 'border-red-200 shadow-red-500/10') : ''}`}>
                   
-                  <div className={`absolute left-0 top-5 sm:top-6 bottom-5 sm:bottom-6 w-1.5 rounded-r-md ${isRemarcacao ? 'bg-amber-500' : 'bg-indigo-500'}`}></div>
+                  {isPendente && <div className="absolute top-0 left-0 w-full h-1 bg-red-500"></div>}
+                  
+                  <div className={`absolute left-0 top-5 sm:top-6 bottom-5 sm:bottom-6 w-1.5 rounded-r-md ${isPendente ? 'bg-red-500' : (isRemarcacao ? 'bg-amber-500' : 'bg-indigo-500')}`}></div>
 
                   <div className="flex justify-between items-start mb-3 sm:mb-4 pl-3 sm:pl-4">
                     <h3 className={`font-black text-lg sm:text-xl leading-tight pr-14 break-words line-clamp-2 ${darkMode ? 'text-white' : 'text-slate-800'}`}>
@@ -781,9 +939,12 @@ export default function App() {
                       <button onClick={() => setEventDetailsModal(event)} className={`p-2 sm:p-2.5 rounded-xl transition-colors ${darkMode ? 'text-indigo-400 hover:text-white hover:bg-slate-800' : 'text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50'}`} title="Ver Detalhes">
                         <Eye size={18} className="sm:w-5 sm:h-5" />
                       </button>
-                      <button onClick={() => setDeleteConfirm({ isOpen: true, id: event?.id, title: details.assunto, type: 'event' })} className={`p-2 sm:p-2.5 rounded-xl transition-colors ${darkMode ? 'text-slate-500 hover:text-red-400 hover:bg-red-500/10' : 'text-slate-400 hover:text-red-500 hover:bg-red-50'}`} title="Remover / Remarcar">
-                        <Trash2 size={18} className="sm:w-5 sm:h-5" />
-                      </button>
+                      
+                      {!isPendente && (
+                        <button onClick={() => setDeleteConfirm({ isOpen: true, id: event?.id, title: details.assunto, type: 'event' })} className={`p-2 sm:p-2.5 rounded-xl transition-colors ${darkMode ? 'text-slate-500 hover:text-red-400 hover:bg-red-500/10' : 'text-slate-400 hover:text-red-500 hover:bg-red-50'}`} title={isAdmin ? "Remover" : "Solicitar Exclusão"}>
+                          {isAdmin ? <Trash2 size={18} className="sm:w-5 sm:h-5" /> : <ShieldAlert size={18} className="sm:w-5 sm:h-5" />}
+                        </button>
+                      )}
                     </div>
                   </div>
                   
@@ -794,19 +955,12 @@ export default function App() {
                           <Briefcase size={16} className={`sm:w-4 sm:h-4 shrink-0`} /> 
                           <span className="truncate">{String(associatedSlot.atendente || associatedSlot.Atendente || 'Balcão')}</span>
                         </div>
-                        <button 
-                          onClick={() => setEditAtendenteModal({ isOpen: true, slotId: associatedSlot.id, currentName: String(associatedSlot.atendente || associatedSlot.Atendente || '') })}
-                          className={`p-1.5 rounded-lg opacity-100 sm:opacity-0 sm:group-hover/atendente:opacity-100 transition-all ${darkMode ? 'bg-slate-800 text-indigo-400 hover:bg-slate-700' : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'}`}
-                          title="Alterar Atendente"
-                        >
-                          <Pencil size={14} className="sm:w-4 sm:h-4" />
-                        </button>
                       </div>
                     )}
                     
                     {details.nome && details.nome !== details.assunto && (
                       <div className={`flex items-center gap-2 sm:gap-3 font-bold text-xs sm:text-sm ${darkMode ? 'text-slate-200' : 'text-slate-700'}`}>
-                        <User size={16} className={`sm:w-4 sm:h-4 shrink-0 ${darkMode ? 'text-indigo-400' : 'text-indigo-500'}`} /> <span className="truncate">{details.nome}</span>
+                        <User size={16} className={`sm:w-4 sm:h-4 shrink-0 ${isPendente ? 'text-red-500' : (darkMode ? 'text-indigo-400' : 'text-indigo-500')}`} /> <span className="truncate">{details.nome}</span>
                       </div>
                     )}
                     <div className={`flex items-center gap-2 sm:gap-3 font-semibold text-xs sm:text-sm ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
@@ -824,6 +978,26 @@ export default function App() {
                       </div>
                     )}
                   </div>
+                  
+                  {isPendente && (
+                     <div className="mt-4 pt-4 border-t border-red-500/20 pl-3 sm:pl-4">
+                        {isAdmin ? (
+                          <div className="flex gap-2">
+                            <button onClick={() => handleDelete(event.id, 'event')} className="flex-1 bg-red-600 hover:bg-red-500 text-white py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-red-600/20 active:scale-95">
+                               <CheckCircle2 size={14}/> Aprovar
+                            </button>
+                            <button onClick={() => handleRejectDeletion(associatedSlot?.id)} className={`flex-1 py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95 ${darkMode ? 'bg-slate-800 text-slate-300 hover:bg-slate-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                               <XCircle size={14}/> Rejeitar
+                            </button>
+                          </div>
+                        ) : (
+                          <div className={`text-xs font-bold uppercase tracking-widest flex items-center gap-2 ${darkMode ? 'text-red-400' : 'text-red-600'}`}>
+                            <ShieldAlert size={16} /> Aguarda Aprovação
+                          </div>
+                        )}
+                     </div>
+                  )}
+
                 </div>
               );
             })}
@@ -850,9 +1024,6 @@ export default function App() {
               </div>
             </div>
           )}
-          <p className="text-slate-500 mt-6 sm:mt-8 text-xs sm:text-sm font-semibold max-w-sm px-4">
-            Aguarde. Por favor, não feche nem recarregue a página até que o processo seja concluído.
-          </p>
         </div>
       )}
 
@@ -898,6 +1069,35 @@ export default function App() {
         </div>
       )}
 
+      {/* MODAL: EDITAR ATENDENTE */}
+      {editAtendenteModal.isOpen && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+          <div className={`w-full max-w-sm p-6 sm:p-8 rounded-[2rem] shadow-2xl animate-in zoom-in-95 duration-200 border ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-white'}`}>
+            <div className="flex justify-between items-center mb-6">
+              <h3 className={`font-black text-xl ${darkMode ? 'text-white' : 'text-slate-800'}`}>Alterar Atendente</h3>
+              <button onClick={() => setEditAtendenteModal({isOpen: false, slotId: null, currentName: ''})} className={`p-2 rounded-full transition-colors ${darkMode ? 'bg-slate-800 text-slate-400 hover:text-white' : 'bg-slate-100 text-slate-500 hover:text-slate-800'}`}><X size={20}/></button>
+            </div>
+            <form onSubmit={handleUpdateAtendente} className="space-y-5">
+              <div>
+                <label className={`block text-[10px] sm:text-xs font-bold uppercase mb-2 ml-1 tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Nome do Atendente</label>
+                <input 
+                  autoFocus required list="atendentes-list-edit" placeholder="Nome do atendente..."
+                  className={`w-full px-4 py-3 rounded-xl border text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-800 focus:border-indigo-500 focus:bg-white'}`} 
+                  value={editAtendenteModal.currentName} 
+                  onChange={e => setEditAtendenteModal({...editAtendenteModal, currentName: e.target.value})} 
+                />
+                <datalist id="atendentes-list-edit">
+                  {uniqueAtendentes.map((nome, i) => <option key={`edit-atendente-${i}`} value={nome} />)}
+                </datalist>
+              </div>
+              <button disabled={loading} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-3.5 rounded-xl font-black text-sm transition-all flex justify-center items-center gap-2 active:scale-95 disabled:opacity-50">
+                {loading ? <Loader2 className="animate-spin" size={20} /> : 'Salvar Alteração'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* MODAL: GERADOR EM MASSA DE VAGAS */}
       {isSlotModalOpen && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-50 flex items-end sm:items-center justify-center sm:p-4">
@@ -911,7 +1111,6 @@ export default function App() {
             </div>
             
             <form onSubmit={handleCreateMassSlots} className="space-y-5 sm:space-y-6">
-              
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-5">
                 <div>
                   <label className={`block text-[10px] sm:text-xs font-bold uppercase mb-1.5 sm:mb-2 ml-1 tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>A Partir Da Data</label>
@@ -931,9 +1130,7 @@ export default function App() {
                       const isSelected = slotData.weekdays.includes(day.id);
                       return (
                         <button 
-                          key={day.id} 
-                          type="button" 
-                          onClick={() => toggleWeekday(day.id)}
+                          key={day.id} type="button" onClick={() => toggleWeekday(day.id)}
                           className={`px-3 sm:px-4 py-2 sm:py-2.5 rounded-lg sm:rounded-xl text-xs sm:text-sm font-bold transition-all duration-200 ${isSelected ? 'bg-indigo-600 text-white shadow-md shadow-indigo-500/20' : (darkMode ? 'bg-slate-800 text-slate-500 hover:bg-slate-700' : 'bg-slate-100 text-slate-500 hover:bg-slate-200')}`}
                         >
                           {day.label}
@@ -949,30 +1146,17 @@ export default function App() {
                   <span>Atendentes (Múltiplos)</span>
                   <span className="text-indigo-500">{slotData.atendentes.length} adicionado(s)</span>
                 </label>
-                
                 <div className="flex gap-2">
                   <input 
-                    list="atendentes-list" 
-                    placeholder="Nome do atendente e Enter..." 
+                    list="atendentes-list" placeholder="Nome do atendente e Enter..." 
                     className={`flex-1 px-4 sm:px-5 py-3 sm:py-4 rounded-xl sm:rounded-2xl border text-sm sm:text-base font-bold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-800 focus:border-indigo-500 focus:bg-white'}`} 
-                    value={newAtendente} 
-                    onChange={e => setNewAtendente(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault(); // Impede o envio do formulário
-                        handleAddAtendenteToMassSlot();
-                      }
-                    }}
+                    value={newAtendente} onChange={e => setNewAtendente(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleAddAtendenteToMassSlot(); } }}
                   />
-                  <button 
-                    type="button" 
-                    onClick={handleAddAtendenteToMassSlot}
-                    className="bg-indigo-100 text-indigo-700 hover:bg-indigo-200 px-4 sm:px-5 rounded-xl sm:rounded-2xl font-bold transition-colors dark:bg-indigo-500/20 dark:text-indigo-400 dark:hover:bg-indigo-500/30 flex items-center justify-center shrink-0"
-                  >
+                  <button type="button" onClick={handleAddAtendenteToMassSlot} className="bg-indigo-100 text-indigo-700 hover:bg-indigo-200 px-4 sm:px-5 rounded-xl sm:rounded-2xl font-bold transition-colors dark:bg-indigo-500/20 dark:text-indigo-400 dark:hover:bg-indigo-500/30 flex items-center justify-center shrink-0">
                     <Plus size={20} />
                   </button>
                 </div>
-                
                 <datalist id="atendentes-list">
                   {uniqueAtendentes.map((nome, i) => <option key={`atendente-${i}`} value={nome} />)}
                 </datalist>
@@ -983,11 +1167,7 @@ export default function App() {
                       <div key={atendente} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${darkMode ? 'bg-slate-800 text-slate-300' : 'bg-white border border-slate-200 shadow-sm text-slate-700'}`}>
                         <Briefcase size={14} className="opacity-50" />
                         <span>{atendente}</span>
-                        <button 
-                          type="button" 
-                          onClick={() => setSlotData(p => ({...p, atendentes: p.atendentes.filter(a => a !== atendente)}))}
-                          className="ml-1 p-0.5 rounded-md hover:bg-red-100 hover:text-red-600 dark:hover:bg-red-500/20 dark:hover:text-red-400 transition-colors"
-                        >
+                        <button type="button" onClick={() => setSlotData(p => ({...p, atendentes: p.atendentes.filter(a => a !== atendente)}))} className="ml-1 p-0.5 rounded-md hover:bg-red-100 hover:text-red-600 dark:hover:bg-red-500/20 dark:hover:text-red-400 transition-colors">
                           <X size={14} />
                         </button>
                       </div>
@@ -1007,9 +1187,7 @@ export default function App() {
                     const isSelected = slotData.times.includes(time);
                     return (
                       <button 
-                        key={time} 
-                        type="button" 
-                        onClick={() => toggleTimeSelection(time)}
+                        key={time} type="button" onClick={() => toggleTimeSelection(time)}
                         className={`py-2 sm:py-3 rounded-lg sm:rounded-xl text-xs sm:text-sm font-black transition-all duration-200 ${isSelected ? 'bg-indigo-600 text-white shadow-md shadow-indigo-500/30 scale-105' : (darkMode ? 'bg-slate-800 text-slate-400 hover:bg-slate-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200')}`}
                       >
                         {time}
@@ -1017,7 +1195,6 @@ export default function App() {
                     )
                   })}
                 </div>
-                
                 <div className="flex justify-end mt-2">
                    <button type="button" onClick={() => setSlotData(p => ({...p, times: []}))} className={`text-[10px] sm:text-xs font-bold ${darkMode ? 'text-slate-500 hover:text-slate-300' : 'text-slate-400 hover:text-slate-600'}`}>Limpar Seleção</button>
                 </div>
@@ -1025,38 +1202,6 @@ export default function App() {
 
               <button disabled={loading || slotData.times.length === 0 || slotData.atendentes.length === 0} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-3 sm:py-4 rounded-xl sm:rounded-2xl font-black text-sm sm:text-lg mt-2 sm:mt-4 shadow-lg shadow-indigo-600/30 transition-all flex justify-center items-center gap-2 active:scale-95 disabled:opacity-50 disabled:active:scale-100">
                 {loading ? <Loader2 className="animate-spin" size={20} /> : `Gerar Vagas (${slotData.times.length * slotData.atendentes.length * (slotData.endDate ? getDatesInRange(slotData.startDate, slotData.endDate, slotData.weekdays).length : 1)} no total)`}
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL: EDITAR ATENDENTE */}
-      {editAtendenteModal.isOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
-          <div className={`w-full max-w-sm p-6 sm:p-8 rounded-[2rem] shadow-2xl animate-in zoom-in-95 duration-200 border ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-white'}`}>
-            <div className="flex justify-between items-center mb-6">
-              <h3 className={`font-black text-xl ${darkMode ? 'text-white' : 'text-slate-800'}`}>Alterar Atendente</h3>
-              <button onClick={() => setEditAtendenteModal({isOpen: false, slotId: null, currentName: ''})} className={`p-2 rounded-full transition-colors ${darkMode ? 'bg-slate-800 text-slate-400 hover:text-white' : 'bg-slate-100 text-slate-500 hover:text-slate-800'}`}><X size={20}/></button>
-            </div>
-            <form onSubmit={handleUpdateAtendente} className="space-y-5">
-              <div>
-                <label className={`block text-[10px] sm:text-xs font-bold uppercase mb-2 ml-1 tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Nome do Atendente</label>
-                <input 
-                  autoFocus
-                  required 
-                  list="atendentes-list-edit"
-                  placeholder="Nome do atendente..."
-                  className={`w-full px-4 py-3 rounded-xl border text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-800 focus:border-indigo-500 focus:bg-white'}`} 
-                  value={editAtendenteModal.currentName} 
-                  onChange={e => setEditAtendenteModal({...editAtendenteModal, currentName: e.target.value})} 
-                />
-                <datalist id="atendentes-list-edit">
-                  {uniqueAtendentes.map((nome, i) => <option key={`edit-atendente-${i}`} value={nome} />)}
-                </datalist>
-              </div>
-              <button disabled={loading} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-3.5 rounded-xl font-black text-sm transition-all flex justify-center items-center gap-2 active:scale-95 disabled:opacity-50">
-                {loading ? <Loader2 className="animate-spin" size={20} /> : 'Salvar Alteração'}
               </button>
             </form>
           </div>
@@ -1090,12 +1235,11 @@ export default function App() {
                 <div>
                   <label className={`block text-[10px] sm:text-xs font-bold uppercase mb-1.5 sm:mb-2 ml-1 tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Telefone</label>
                   <input required placeholder="(95) 90000-0000" className={`w-full px-4 sm:px-5 py-3 sm:py-4 rounded-xl sm:rounded-2xl border text-sm sm:text-base font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white placeholder-slate-500 focus:border-emerald-500' : 'bg-slate-50 border-slate-200 text-slate-800 placeholder-slate-400 focus:border-emerald-500 focus:bg-white'}`} 
-                         value={formData.telefone} 
-                         onChange={e => setFormData({...formData, telefone: formatPhone(e.target.value)})} />
+                         value={formData.telefone} onChange={e => setFormData({...formData, telefone: formatPhone(e.target.value)})} />
                 </div>
                 <div>
-                  <label className={`block text-[10px] sm:text-xs font-bold uppercase mb-1.5 sm:mb-2 ml-1 tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>E-mail</label>
-                  <input required type="email" placeholder="@tjrr.jus.br" className={`w-full px-4 sm:px-5 py-3 sm:py-4 rounded-xl sm:rounded-2xl border text-sm sm:text-base font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white placeholder-slate-500 focus:border-emerald-500' : 'bg-slate-50 border-slate-200 text-slate-800 placeholder-slate-400 focus:border-emerald-500 focus:bg-white'}`} value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} />
+                  <label className={`block text-[10px] sm:text-xs font-bold uppercase mb-1.5 sm:mb-2 ml-1 tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>E-mail <span className="lowercase text-[10px] font-normal opacity-75">(Opcional)</span></label>
+                  <input type="email" placeholder="@tjrr.jus.br" className={`w-full px-4 sm:px-5 py-3 sm:py-4 rounded-xl sm:rounded-2xl border text-sm sm:text-base font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white placeholder-slate-500 focus:border-emerald-500' : 'bg-slate-50 border-slate-200 text-slate-800 placeholder-slate-400 focus:border-emerald-500 focus:bg-white'}`} value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} />
                 </div>
               </div>
               
@@ -1119,19 +1263,21 @@ export default function App() {
             
             {deleteConfirm.type === 'event' ? (
               <>
-                <div className={`p-4 sm:p-5 rounded-full inline-block mb-4 sm:mb-6 ${darkMode ? 'bg-indigo-500/20 text-indigo-400' : 'bg-indigo-100 text-indigo-600'}`}><RefreshCw size={28} className="sm:w-9 sm:h-9" /></div>
-                <h3 className={`font-black text-xl sm:text-2xl mb-2 sm:mb-3 ${darkMode ? 'text-white' : 'text-slate-800'}`}>Gerir Agendamento</h3>
-                <p className={`text-xs sm:text-sm font-medium mb-6 sm:mb-8 px-2 break-words line-clamp-3 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>O que deseja fazer com <strong className={darkMode ? 'text-slate-300' : 'text-slate-700'}>"{String(deleteConfirm.title)}"</strong>?</p>
+                <div className={`p-4 sm:p-5 rounded-full inline-block mb-4 sm:mb-6 ${darkMode ? (isAdmin ? 'bg-red-500/20 text-red-400' : 'bg-orange-500/20 text-orange-400') : (isAdmin ? 'bg-red-100 text-red-600' : 'bg-orange-100 text-orange-600')}`}>
+                  {isAdmin ? <Trash2 size={28} className="sm:w-9 sm:h-9" /> : <ShieldAlert size={28} className="sm:w-9 sm:h-9" />}
+                </div>
+                <h3 className={`font-black text-xl sm:text-2xl mb-2 sm:mb-3 ${darkMode ? 'text-white' : 'text-slate-800'}`}>{isAdmin ? 'Gerir Agendamento' : 'Solicitar Exclusão?'}</h3>
+                <p className={`text-xs sm:text-sm font-medium mb-6 sm:mb-8 px-2 break-words line-clamp-3 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                  {isAdmin ? 'O que deseja fazer com ' : 'Deseja solicitar o cancelamento de '}<strong className={darkMode ? 'text-slate-300' : 'text-slate-700'}>"{String(deleteConfirm.title)}"</strong>?
+                </p>
                 <div className="flex flex-col gap-2.5 sm:gap-3">
-                  <button onClick={handleReschedule} disabled={loading} className="w-full py-3 sm:py-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-black text-xs sm:text-sm shadow-lg shadow-indigo-600/30 transition-all active:scale-95">
-                    Remarcar Data
+                  {isAdmin && (
+                    <button onClick={handleReschedule} disabled={loading} className="w-full py-3 sm:py-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-black text-xs sm:text-sm shadow-lg shadow-indigo-600/30 transition-all active:scale-95">Remarcar Data</button>
+                  )}
+                  <button onClick={() => handleDelete(deleteConfirm.id, deleteConfirm.type)} disabled={loading} className={`w-full py-3 sm:py-4 rounded-xl font-bold text-xs sm:text-sm transition-all ${isAdmin ? (darkMode ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20' : 'bg-red-50 text-red-600 hover:bg-red-100') : 'bg-orange-600 text-white hover:bg-orange-500 active:scale-95'}`}>
+                    {isAdmin ? 'Cancelar Definitivamente' : 'Enviar Solicitação de Exclusão'}
                   </button>
-                  <button onClick={() => handleDelete(deleteConfirm.id, deleteConfirm.type)} disabled={loading} className={`w-full py-3 sm:py-4 rounded-xl font-bold text-xs sm:text-sm transition-all ${darkMode ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20' : 'bg-red-50 text-red-600 hover:bg-red-100'}`}>
-                    Cancelar Definitivamente
-                  </button>
-                  <button onClick={() => setDeleteConfirm({ isOpen: false, id: null, title: '', type: 'event' })} className={`w-full py-2.5 sm:py-3 rounded-xl font-bold text-xs sm:text-sm transition-all mt-1 sm:mt-2 ${darkMode ? 'text-slate-400 hover:bg-slate-800 hover:text-slate-300' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'}`}>
-                    Voltar
-                  </button>
+                  <button onClick={() => setDeleteConfirm({ isOpen: false, id: null, title: '', type: 'event' })} className={`w-full py-2.5 sm:py-3 rounded-xl font-bold text-xs sm:text-sm transition-all mt-1 sm:mt-2 ${darkMode ? 'text-slate-400 hover:bg-slate-800 hover:text-slate-300' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'}`}>Voltar</button>
                 </div>
               </>
             ) : (
@@ -1145,7 +1291,6 @@ export default function App() {
                 </div>
               </>
             )}
-            
           </div>
         </div>
       )}
