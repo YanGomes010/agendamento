@@ -9,14 +9,11 @@ import {
 
 // --- FIREBASE IMPORTS PARA O MULTIPLAYER EM TEMPO REAL ---
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, doc, setDoc, onSnapshot } from 'firebase/firestore';
+import { getAuth, signInAnonymously, onAuthStateChanged, signOut } from 'firebase/auth';
+import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc } from 'firebase/firestore';
 
-// --- CONFIGURAÇÃO FIXA N8N E FIREBASE ---
-const WEBHOOK_URL = "https://n8n-ouvidoria.tjrr.jus.br/webhook/calendar-api";
-
-// 🔴 ATENÇÃO VERCEL: CONFIGURAÇÃO FIREBASE (MULTIPLAYER)
-// Cole as chaves do seu projeto Firebase nas strings abaixo.
+// --- CONFIGURAÇÃO FIREBASE (MULTIPLAYER) ---
+// 🔴 ATENÇÃO: Cole as chaves do seu projeto Firebase nas strings abaixo.
 const FIREBASE_CONFIG = {
   apiKey: "AIzaSyBqZsc1aPe7-b_f9yXHvpEdWe6BYnjDvGw",
   authDomain: "ouvidoria-juizados.firebaseapp.com",
@@ -28,13 +25,13 @@ const FIREBASE_CONFIG = {
 
 let app = null, auth = null, db = null, appId = 'escritorio-ouvidoria-tjrr';
 try {
-  // 1º Tenta usar a sua configuração manual/Vercel
-  if (FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey !== "COLE_AQUI_API_KEY") {
+  // 1º Tenta usar a sua configuração manual (Se preencheu a apiKey)
+  if (FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey !== "AIzaSyBqZsc1aPe7-b_f9yXHvpEdWe6BYnjDvGw") {
     app = initializeApp(FIREBASE_CONFIG);
     auth = getAuth(app);
     db = getFirestore(app);
   } 
-  // 2º Fallback mágico para testes rápidos dentro do simulador
+  // 2º Fallback mágico para testes
   else if (typeof __firebase_config !== 'undefined') {
     const fallbackConfig = JSON.parse(__firebase_config);
     app = initializeApp(fallbackConfig);
@@ -46,6 +43,8 @@ try {
   console.warn("Modo Local (Offline) ativado. Verifique as chaves Firebase.");
 }
 
+// --- CONFIGURAÇÃO FIXA N8N ---
+const WEBHOOK_URL = "https://n8n-ouvidoria.tjrr.jus.br/webhook/calendar-api";
 
 // --- MAPA DO ESCRITÓRIO VIRTUAL (RPG PIXEL ART 16-BITS) ---
 // Legenda de Tiles:
@@ -123,7 +122,7 @@ export default function App() {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const isAdmin = authUser?.perfil?.toLowerCase() === 'admin' || String(authUser?.email).toLowerCase().includes('admin');
 
-  // Padrão de ecrã para utilizadores normais é 'sheets', ecrã 'office' está restrito
+  // Padrão de ecrã inicial
   const [view, setView] = useState('sheets'); 
   const [events, setEvents] = useState([]);
   const [slots, setSlots] = useState([]);
@@ -159,8 +158,8 @@ export default function App() {
 
   // === MULTIPLAYER E MOVIMENTO ===
   useEffect(() => {
-    // Apenas liga a sincronização de jogadores se o utilizador for Admin (já que apenas admins têm acesso)
-    if (!authUser || !isAdmin) return;
+    // Sincronização ligada para todos os utilizadores
+    if (!authUser) return;
     let unsub = () => {};
     let intervalId;
 
@@ -171,7 +170,7 @@ export default function App() {
           const myUid = auth.currentUser.uid;
           const myDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'office_users', myUid);
           
-          await setDoc(myDocRef, { nome: authUser.nome || authUser.email, perfil: 'admin', x: myPos.x, y: myPos.y, lastActive: Date.now() }, { merge: true });
+          await setDoc(myDocRef, { nome: authUser.nome || authUser.email, perfil: isAdmin ? 'admin' : 'user', x: myPos.x, y: myPos.y, lastActive: Date.now() }, { merge: true });
 
           const usersRef = collection(db, 'artifacts', appId, 'public', 'data', 'office_users');
           unsub = onSnapshot(usersRef, (snapshot) => {
@@ -192,7 +191,7 @@ export default function App() {
   }, [authUser, isAdmin]);
 
   useEffect(() => {
-    if (view !== 'office' || !isAdmin) return; 
+    if (view !== 'office') return; 
 
     const handleKeyDown = (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
@@ -227,7 +226,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handleKeyDown, { passive: false });
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [view, isAdmin]);
+  }, [view]);
 
   const myUid = auth?.currentUser?.uid || 'local-user';
   const otherPlayers = onlinePlayers.filter(p => p.id !== myUid);
@@ -271,7 +270,23 @@ export default function App() {
     }
   };
 
-  const handleLogout = () => { setAuthUser(null); localStorage.removeItem('ouvidoria_user'); setEvents([]); setSlots([]); };
+  const handleLogout = async () => { 
+    // Se o Firebase estiver ativo, remove o boneco do mapa e desloga do servidor
+    if (auth?.currentUser && db) {
+      try {
+        await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'office_users', auth.currentUser.uid));
+        await signOut(auth);
+      } catch (err) {
+        console.error("Erro ao remover avatar do servidor:", err);
+      }
+    }
+    
+    // Limpa a interface localmente
+    setAuthUser(null); 
+    localStorage.removeItem('ouvidoria_user'); 
+    setEvents([]); 
+    setSlots([]); 
+  };
 
   const fetchData = useCallback(async () => {
     if (!authUser) return; 
@@ -337,27 +352,83 @@ export default function App() {
     setProgressData({ active: false, current: 0, total: 0, message: '' }); setLoading(false); fetchData();
   };
 
+  // --- SELETORES EM MASSA ---
+  const toggleTimeSelection = (time) => {
+    setSlotData(prev => ({
+      ...prev, 
+      times: prev.times.includes(time) ? prev.times.filter(t => t !== time) : [...prev.times, time].sort()
+    }));
+  };
+
+  const toggleWeekday = (id) => {
+    setSlotData(prev => ({
+      ...prev,
+      weekdays: prev.weekdays.includes(id) ? prev.weekdays.filter(d => d !== id) : [...prev.weekdays, id]
+    }));
+  };
+
+  const handleAddAtendenteToMassSlot = () => {
+    if (newAtendente.trim()) {
+      if (!slotData.atendentes.includes(newAtendente.trim())) {
+        setSlotData(p => ({...p, atendentes: [...p.atendentes, newAtendente.trim()]}));
+      }
+      setNewAtendente('');
+    }
+  };
+
+  const getDatesInRange = (start, end, weekdays) => {
+    let current = new Date(start + 'T12:00:00');
+    const endDate = new Date(end + 'T12:00:00');
+    const dates = [];
+    while (current <= endDate) {
+      if (weekdays.includes(current.getDay())) {
+        dates.push(current.toISOString().split('T')[0]);
+      }
+      current.setDate(current.getDate() + 1);
+    }
+    return dates;
+  };
+
   const handleCreateMassSlots = async (e) => {
     e.preventDefault();
-    if (!slotData.startDate) return showToast("Selecione a Data Inicial.", "error"); if (slotData.atendentes.length === 0) return showToast("Adicione um atendente!", "error"); if (slotData.times.length === 0) return showToast("Selecione um horário!", "error");
+    if (!slotData.startDate) return showToast("Selecione a Data Inicial.", "error");
+    if (slotData.atendentes.length === 0) return showToast("Adicione pelo menos um atendente!", "error");
+    if (slotData.times.length === 0) return showToast("Selecione pelo menos um horário!", "error");
     
-    let current = new Date(slotData.startDate + 'T12:00:00'); const endDate = new Date((slotData.endDate || slotData.startDate) + 'T12:00:00'); const datesToProcess = [];
-    while (current <= endDate) { if (slotData.weekdays.includes(current.getDay())) datesToProcess.push(current.toISOString().split('T')[0]); current.setDate(current.getDate() + 1); }
-    if (datesToProcess.length === 0) return showToast("Nenhum dia válido.", "error");
+    const datesToProcess = slotData.endDate 
+      ? getDatesInRange(slotData.startDate, slotData.endDate, slotData.weekdays) 
+      : [slotData.startDate];
+
+    if (datesToProcess.length === 0) return showToast("Nenhum dia válido encontrado.", "error");
     
-    const totalTasks = datesToProcess.length * slotData.times.length * slotData.atendentes.length; let sucessos = 0;
-    setIsSlotModalOpen(false); setLoading(true); setProgressData({ active: true, current: 0, total: totalTasks, message: 'A criar vagas...' });
+    const totalTasks = datesToProcess.length * slotData.times.length * slotData.atendentes.length;
+    let sucessos = 0;
+    
+    setIsSlotModalOpen(false); 
+    setLoading(true);
+    setProgressData({ active: true, current: 0, total: totalTasks, message: 'A criar vagas no sistema...' });
     
     for (const dateIso of datesToProcess) {
-      const parts = dateIso.split('-'); const formattedData = `${parts[2]}/${parts[1]}/${parts[0]}`; 
+      const parts = dateIso.split('-');
+      const formattedData = `${parts[2]}/${parts[1]}/${parts[0]}`; 
+      
       for (const time of slotData.times) {
         for (const atendente of slotData.atendentes) {
-          sucessos++; setProgressData(prev => ({ ...prev, current: sucessos }));
-          await callN8N('create_slot', { data: formattedData, horario: time, atendente: atendente, status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' });
+          sucessos++;
+          setProgressData(prev => ({ ...prev, current: sucessos }));
+          await callN8N('create_slot', { 
+            data: formattedData, horario: time, atendente: atendente,
+            status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: ''
+          });
         }
       }
     }
-    setProgressData({ active: false, current: 0, total: 0, message: '' }); showToast(`${sucessos} vagas geradas!`, "success"); setSlotData({ startDate: todayStr, endDate: '', weekdays: [1, 2, 3, 4, 5], times: [], atendentes: [] }); setLoading(false); fetchData(); 
+    
+    setProgressData({ active: false, current: 0, total: 0, message: '' });
+    showToast(`${sucessos} vagas geradas com sucesso!`, "success"); 
+    setSlotData({ startDate: todayStr, endDate: '', weekdays: [1, 2, 3, 4, 5], times: [], atendentes: [] });
+    setLoading(false);
+    fetchData(); 
   };
 
   const handleUpdateAtendente = async (e) => {
@@ -541,19 +612,16 @@ export default function App() {
              <Calendar size={16} /> Agendados
           </button>
           
-          {/* BOTÃO VISÍVEL APENAS PARA ADMINS */}
-          {isAdmin && (
-            <button onClick={() => setView('office')} className={`flex-1 py-2.5 sm:py-3 text-[10px] sm:text-xs md:text-sm font-bold rounded-xl transition-all duration-300 flex items-center justify-center gap-1 sm:gap-2 ${view === 'office' ? (darkMode ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20' : 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20') : (darkMode ? 'bg-slate-900 text-slate-400 hover:bg-slate-800' : 'bg-slate-100 text-slate-500 hover:bg-slate-200')}`}>
-               <MonitorSmartphone size={16} /> Escritório Virtual
-            </button>
-          )}
+          <button onClick={() => setView('office')} className={`flex-1 py-2.5 sm:py-3 text-[10px] sm:text-xs md:text-sm font-bold rounded-xl transition-all duration-300 flex items-center justify-center gap-1 sm:gap-2 ${view === 'office' ? (darkMode ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20' : 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20') : (darkMode ? 'bg-slate-900 text-slate-400 hover:bg-slate-800' : 'bg-slate-100 text-slate-500 hover:bg-slate-200')}`}>
+             <MonitorSmartphone size={16} /> Escritório Virtual
+          </button>
         </div>
       </header>
 
       <main className="max-w-5xl mx-auto px-3 sm:px-4 py-6 sm:py-8 space-y-5 sm:space-y-6 pb-32">
         
-        {/* === MODO ESCRITÓRIO VIRTUAL (PIXEL ART RPG) - ADMIN ONLY === */}
-        {view === 'office' && isAdmin && (
+        {/* === MODO ESCRITÓRIO VIRTUAL (PIXEL ART RPG) === */}
+        {view === 'office' && (
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 flex flex-col items-center">
             
             <div className={`w-full max-w-4xl p-6 rounded-[2rem] shadow-xl mb-6 border flex flex-col sm:flex-row items-center justify-between gap-4 ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
@@ -563,7 +631,7 @@ export default function App() {
                </div>
                <div className="flex gap-4">
                   <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest"><div className="w-3 h-3 rounded-full bg-amber-500 border border-white"></div> Admins</div>
-                  <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest"><div className="w-3 h-3 rounded-full bg-indigo-500 border border-white"></div> Equipa</div>
+                  <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest"><div className="w-3 h-3 rounded-full bg-indigo-500 border border-white"></div> Equipe</div>
                </div>
             </div>
 
@@ -696,7 +764,7 @@ export default function App() {
                     
                     {/* NameTag RPG Style */}
                     <div className="absolute -top-4 sm:-top-5 bg-slate-950 text-white text-[8px] sm:text-[10px] px-2 py-0.5 rounded-[4px] font-bold whitespace-nowrap shadow-md border-b-2 border-slate-700 pointer-events-none z-30">
-                      {p.nome.split(' ')[0]}
+                      {String(p.nome || 'Convidado').split(' ')[0]}
                     </div>
                     
                     {/* Sprite do Boneco Completo */}
@@ -707,8 +775,8 @@ export default function App() {
                        {/* Cabeça (Dicebear) */}
                        <div className="w-[120%] h-[65%] relative z-20 flex justify-center -mb-[5%]">
                           <img 
-                             src={`https://api.dicebear.com/7.x/pixel-art/svg?seed=${p.nome}&backgroundColor=transparent`} 
-                             alt={p.nome}
+                             src={`https://api.dicebear.com/7.x/pixel-art/svg?seed=${p.nome || 'Convidado'}&backgroundColor=transparent`} 
+                             alt={p.nome || 'Convidado'}
                              className={`w-full h-full object-contain pointer-events-none drop-shadow-md ${p.isMe ? 'animate-pulse' : ''}`}
                              style={{ imageRendering: 'pixelated', animationDuration: '2s' }}
                           />
@@ -926,7 +994,7 @@ export default function App() {
                <div className="col-span-full text-center py-16 sm:py-20 animate-in fade-in">
                  <Calendar size={48} className={`mx-auto mb-4 sm:w-14 sm:h-14 ${darkMode ? 'text-slate-800' : 'text-slate-200'}`} />
                  <p className={`font-semibold text-base sm:text-lg ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
-                   {isSearching ? 'Nenhuma vaga encontrada para esta pesquisa.' : 'O dia está vazio. Nenhuma vaga criada.'}
+                   {isSearching ? 'Nenhuma agendamento oficial encontrado.' : 'Agenda livre neste dia.'}
                  </p>
                </div>
             )}
