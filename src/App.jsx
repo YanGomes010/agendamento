@@ -12,22 +12,40 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, doc, setDoc, onSnapshot } from 'firebase/firestore';
 
-// --- CONFIGURAÇÃO FIREBASE ---
-let app = null, auth = null, db = null, appId = 'escritorio-virtual-padrao';
+// --- CONFIGURAÇÃO FIXA N8N E FIREBASE ---
+const WEBHOOK_URL = "https://n8n-ouvidoria.tjrr.jus.br/webhook/calendar-api";
+
+// 🔴 ATENÇÃO VERCEL: CONFIGURAÇÃO FIREBASE (MULTIPLAYER)
+// Cole as chaves do seu projeto Firebase nas strings abaixo.
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBqZsc1aPe7-b_f9yXHvpEdWe6BYnjDvGw",
+  authDomain: "ouvidoria-juizados.firebaseapp.com",
+  projectId: "ouvidoria-juizados",
+  storageBucket: "ouvidoria-juizados.firebasestorage.app",
+  messagingSenderId: "600434048975",
+  appId: "1:600434048975:web:5ec364ccd576b2b7acdcba"
+};
+
+let app = null, auth = null, db = null, appId = 'escritorio-ouvidoria-tjrr';
 try {
-  if (typeof __firebase_config !== 'undefined') {
-    const firebaseConfig = JSON.parse(__firebase_config);
-    app = initializeApp(firebaseConfig);
+  // 1º Tenta usar a sua configuração manual/Vercel
+  if (FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey !== "COLE_AQUI_API_KEY") {
+    app = initializeApp(FIREBASE_CONFIG);
     auth = getAuth(app);
     db = getFirestore(app);
-    appId = typeof __app_id !== 'undefined' ? __app_id : 'escritorio-virtual-padrao';
+  } 
+  // 2º Fallback mágico para testes rápidos dentro do simulador
+  else if (typeof __firebase_config !== 'undefined') {
+    const fallbackConfig = JSON.parse(__firebase_config);
+    app = initializeApp(fallbackConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+    appId = typeof __app_id !== 'undefined' ? __app_id : 'escritorio-ouvidoria-tjrr';
   }
 } catch (e) {
-  // Silencioso: Ativa o Modo Local (Singleplayer)
+  console.warn("Modo Local (Offline) ativado. Verifique as chaves Firebase.");
 }
 
-// --- CONFIGURAÇÃO FIXA N8N ---
-const WEBHOOK_URL = "https://n8n-ouvidoria.tjrr.jus.br/webhook/calendar-api";
 
 // --- MAPA DO ESCRITÓRIO VIRTUAL (RPG PIXEL ART 16-BITS) ---
 // Legenda de Tiles:
@@ -908,7 +926,7 @@ export default function App() {
                <div className="col-span-full text-center py-16 sm:py-20 animate-in fade-in">
                  <Calendar size={48} className={`mx-auto mb-4 sm:w-14 sm:h-14 ${darkMode ? 'text-slate-800' : 'text-slate-200'}`} />
                  <p className={`font-semibold text-base sm:text-lg ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
-                   {isSearching ? 'Nenhum agendamento oficial encontrado.' : 'Agenda livre neste dia.'}
+                   {isSearching ? 'Nenhuma vaga encontrada para esta pesquisa.' : 'O dia está vazio. Nenhuma vaga criada.'}
                  </p>
                </div>
             )}
