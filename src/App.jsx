@@ -2,8 +2,9 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Calendar, Plus, Trash2, Clock, User, Mail, Loader2,
   AlertCircle, X, Search, FileText, AlertTriangle, Moon, Sun, 
-  Check, Briefcase, RefreshCw, Info, Phone, Eye, ChevronLeft, ChevronRight, CalendarDays, Repeat, Pencil, Lock, LogOut,
-  ShieldAlert, CheckCircle2, XCircle
+  Check, Briefcase, RefreshCw, Info, Phone, Eye, ChevronLeft, 
+  ChevronRight, CalendarDays, Repeat, Pencil, Lock, LogOut,
+  ShieldAlert, CheckCircle2, XCircle, Link
 } from 'lucide-react';
 
 // --- CONFIGURAÇÃO FIXA ---
@@ -37,10 +38,9 @@ const formatPhone = (value) => {
   return v.slice(0, 15);
 };
 
-// Permite e-mail vazio ou valida formato correto
 const isValidEmail = (email) => {
-  if (!email || email.trim() === '') return true; 
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || ''));
+  if (!email || email.trim() === '') return true;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email));
 };
 
 const PREDEFINED_TIMES = [
@@ -232,7 +232,9 @@ export default function App() {
     e.preventDefault();
     if (!selectedSlotForBooking) return;
     
-    if (!isValidEmail(formData.email)) return showToast("E-mail inválido. Deixe em branco ou insira um válido.", "error");
+    if (formData.email && formData.email.trim() !== '' && !isValidEmail(formData.email)) {
+       return showToast("E-mail inválido. Deixe em branco ou insira um válido.", "error");
+    }
     if (formData.telefone.replace(/\D/g, '').length < 10) return showToast("Telefone incompleto.", "error");
 
     setLoading(true);
@@ -253,14 +255,16 @@ export default function App() {
     const end = new Date(start.getTime() + 120 * 60000);
 
     const previousSlots = [...safeSlots];
-    setSlots(prev => prev.map(s => s.id === selectedSlotForBooking.id ? { ...s, status: 'Ocupado', nome_cliente: formData.nome, contato_cliente: `${formData.email} | ${formData.telefone}`, assunto: formData.assunto } : s));
+    setSlots(prev => prev.map(s => s.id === selectedSlotForBooking.id ? { ...s, status: 'Ocupado', nome_cliente: formData.nome, contato_cliente: `${formData.email || ''} | ${formData.telefone}`, assunto: formData.assunto } : s));
     setIsModalOpen(false); 
     
     setProgressData({ active: true, current: 0, total: 1, message: `A agendar ${formData.nome}...` });
 
     const calResult = await callN8N('create', { 
       inicio: toRFC3339WithLocalOffset(start), fim: toRFC3339WithLocalOffset(end),
-      nome: formData.nome, email: formData.email || '', telefone: formData.telefone, assunto: formData.assunto
+      nome: formData.nome, email: formData.email || '', telefone: formData.telefone, assunto: formData.assunto,
+      atendente: selectedSlotForBooking.atendente || selectedSlotForBooking.Atendente || 'Balcão',
+      usuario: authUser.nome || authUser.email
     });
 
     if (calResult) {
@@ -594,12 +598,17 @@ export default function App() {
     const desc = String(event.description || '');
     const nameMatch = desc.match(/Solicitante:\s*(.+)/);
     const telMatch = desc.match(/Telefone:\s*(.+)/);
+    const atendenteMatch = desc.match(/Atendente:\s*(.+)/);
+    const usuarioMatch = desc.match(/Agendado por:\s*(.+)/);
+
     return {
       nome: nameMatch ? nameMatch[1].trim() : '',
       telefone: telMatch ? telMatch[1].trim() : 'Não informado',
       email: event.attendees?.[0]?.email || 'Não informado',
       assunto: String(event.summary || '(Sem Título)'),
-      data: getSafeDateRender(event.start)
+      data: getSafeDateRender(event.start),
+      atendente: atendenteMatch ? atendenteMatch[1].trim() : 'Balcão',
+      usuario: usuarioMatch ? usuarioMatch[1].trim() : 'Sistema'
     };
   };
 
@@ -657,6 +666,7 @@ export default function App() {
           </form>
         </div>
 
+        {/* TOAST FLUTUANTE DE LOGIN */}
         {toast && (
           <div className={`fixed top-6 left-1/2 -translate-x-1/2 px-6 py-4 rounded-2xl shadow-2xl z-[100] animate-in slide-in-from-top-4 flex items-center gap-3 text-sm font-bold whitespace-nowrap border max-w-[90vw] ${toast.type === 'error' ? (darkMode ? 'bg-red-950/90 text-red-400 border-red-900' : 'bg-red-50 text-red-600 border-red-200') : (darkMode ? 'bg-emerald-950/90 text-emerald-400 border-emerald-900' : 'bg-emerald-50 text-emerald-600 border-emerald-200')}`}>
             {toast.type === 'error' ? <AlertCircle size={20} /> : <Check size={20} />}
@@ -912,8 +922,8 @@ export default function App() {
 
               const eventDateStr = event.start?.dateTime ? String(event.start.dateTime).split('T')[0] : String(event.start?.date);
               
+              // Busca vaga para saber se está pendente de exclusão
               const associatedSlot = safeSlots.find(s => {
-                // Modificado para usar nome ou email já que o email agora é opcional
                 if (!s.contato_cliente || (details.email === 'Não informado' && details.nome === '')) return false;
                 if (s.status !== 'Ocupado' && s.status !== 'Pendente Exclusão') return false;
                 const parts = String(s.data || '').split('/');
@@ -949,11 +959,12 @@ export default function App() {
                   </div>
                   
                   <div className="space-y-2.5 sm:space-y-3 mt-4 sm:mt-5 pl-3 sm:pl-4">
-                    {associatedSlot && (
+                    {/* Exibe o Atendente extraído dos Detalhes (criado agora no Google Calendar) */}
+                    {details.atendente && details.atendente !== 'Não informado' && (
                       <div className={`flex items-center justify-between group/atendente pb-2 mb-2 border-b border-dashed ${darkMode ? 'border-slate-800' : 'border-slate-200'}`}>
                         <div className={`flex items-center gap-2 sm:gap-3 font-bold text-xs sm:text-sm ${darkMode ? 'text-indigo-300' : 'text-indigo-700'}`}>
                           <Briefcase size={16} className={`sm:w-4 sm:h-4 shrink-0`} /> 
-                          <span className="truncate">{String(associatedSlot.atendente || associatedSlot.Atendente || 'Balcão')}</span>
+                          <span className="truncate">{details.atendente}</span>
                         </div>
                       </div>
                     )}
@@ -978,6 +989,13 @@ export default function App() {
                       </div>
                     )}
                   </div>
+                  
+                  {/* Exibe QUEM agendou no rodapé */}
+                  {details.usuario && details.usuario !== 'Não informado' && (
+                     <div className={`mt-4 pt-3 border-t ${darkMode ? 'border-slate-800' : 'border-slate-100'} pl-3 sm:pl-4`}>
+                        <p className={`text-[10px] font-bold uppercase tracking-widest ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>Agendado por: <span className={darkMode ? 'text-slate-300' : 'text-slate-600'}>{details.usuario}</span></p>
+                     </div>
+                  )}
                   
                   {isPendente && (
                      <div className="mt-4 pt-4 border-t border-red-500/20 pl-3 sm:pl-4">
@@ -1005,7 +1023,7 @@ export default function App() {
         )}
       </main>
 
-      {/* BLOQUEIO TOTAL E PROGRESSO DE CARREGAMENTO */}
+      {/* MODAL DE CARREGAMENTO */}
       {progressData.active && (
         <div className="fixed inset-0 bg-slate-950/95 backdrop-blur-md z-[100] flex flex-col items-center justify-center p-6 text-center animate-in fade-in duration-300">
           <Loader2 size={48} className="sm:w-16 sm:h-16 text-indigo-500 animate-spin mb-6 sm:mb-8" />
@@ -1062,9 +1080,18 @@ export default function App() {
                   <p className={`font-bold text-sm break-words ${darkMode ? 'text-slate-200' : 'text-slate-700'}`}>{extractEventDetails(eventDetailsModal).email}</p>
                 </div>
               </div>
+              
+              <div className={`mt-6 pt-5 border-t ${darkMode ? 'border-slate-800' : 'border-slate-100'} flex justify-between items-center`}>
+                 <div>
+                    <p className={`text-[10px] font-bold uppercase tracking-widest mb-1 flex items-center gap-1 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}><Briefcase size={12} /> Atendente</p>
+                    <p className={`font-bold text-sm ${darkMode ? 'text-indigo-300' : 'text-indigo-700'}`}>{extractEventDetails(eventDetailsModal).atendente}</p>
+                 </div>
+                 <div className="text-right">
+                    <p className={`text-[10px] font-bold uppercase tracking-widest mb-1 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>Marcado por</p>
+                    <p className={`font-bold text-sm ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>{extractEventDetails(eventDetailsModal).usuario}</p>
+                 </div>
+              </div>
             </div>
-            
-            <button onClick={() => setEventDetailsModal(null)} className={`w-full mt-8 sm:mt-10 py-3 sm:py-4 rounded-xl sm:rounded-2xl font-black text-sm transition-colors active:scale-95 ${darkMode ? 'bg-slate-800 text-white hover:bg-slate-700' : 'bg-slate-100 text-slate-800 hover:bg-slate-200'}`}>Fechar Ficha</button>
           </div>
         </div>
       )}
