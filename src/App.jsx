@@ -1,16 +1,64 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   Calendar, Plus, Trash2, Clock, User, Mail, Loader2,
   AlertCircle, X, Search, FileText, AlertTriangle, Moon, Sun, 
   Check, Briefcase, RefreshCw, Info, Phone, Eye, ChevronLeft, 
   ChevronRight, CalendarDays, Repeat, Pencil, Lock, LogOut,
-  ShieldAlert, CheckCircle2, XCircle, Link
+  ShieldAlert, CheckCircle2, XCircle, MonitorSmartphone, Key
 } from 'lucide-react';
 
-// --- CONFIGURAÇÃO FIXA ---
+// --- FIREBASE IMPORTS PARA O MULTIPLAYER EM TEMPO REAL ---
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, doc, setDoc, onSnapshot } from 'firebase/firestore';
+
+// --- CONFIGURAÇÃO FIREBASE ---
+let app = null, auth = null, db = null, appId = 'escritorio-virtual-padrao';
+try {
+  if (typeof __firebase_config !== 'undefined') {
+    const firebaseConfig = JSON.parse(__firebase_config);
+    app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+    appId = typeof __app_id !== 'undefined' ? __app_id : 'escritorio-virtual-padrao';
+  }
+} catch (e) {
+  // Silencioso: Ativa o Modo Local (Singleplayer)
+}
+
+// --- CONFIGURAÇÃO FIXA N8N ---
 const WEBHOOK_URL = "https://n8n-ouvidoria.tjrr.jus.br/webhook/calendar-api";
 
-// --- HELPERS SEGUROS ---
+// --- MAPA DO ESCRITÓRIO VIRTUAL (RPG PIXEL ART 16-BITS) ---
+// Legenda de Tiles:
+// 0: Chão Madeira
+// 1: Parede (Sólida)
+// 2: Mesa com Computador (Bloqueia)
+// 3: Tapete Sala Administração
+// 4: Vaso de Planta (Bloqueia)
+// 5: Mesa Reunião (Madeira Escura) (Bloqueia)
+// 6: Sofá Vermelho (Caminhável/Sentável)
+// 7: Balcão Receção (Bloqueia)
+// 8: Cadeira de Escritório (Caminhável/Sentável)
+// 9: Máquina de Água/Arcade (Bloqueia)
+const OFFICE_MAP = [
+  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+  [1,3,3,3,1,0,0,2,2,0,0,2,2,0,0,5,5,5,5,5,0,9,1],
+  [1,3,2,3,1,0,0,8,8,0,0,8,8,0,0,5,5,5,5,5,0,0,1],
+  [1,3,8,3,1,0,0,0,0,0,0,0,0,0,0,8,8,8,8,8,0,0,1],
+  [1,1,0,1,1,0,0,2,2,0,0,2,2,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,8,8,0,0,8,8,0,0,6,6,0,6,6,0,0,1],
+  [1,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,7,7,7,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,4,0,0,0,0,0,0,0,8,0,0,0,0,0,0,0,0,0,0,4,0,1],
+  [1,1,1,1,1,1,1,1,1,0,0,1,1,1,1,1,1,1,1,1,1,1,1]
+];
+
+const MAP_H = OFFICE_MAP.length;
+const MAP_W = OFFICE_MAP[0].length;
+
+// --- HELPERS ---
 function toRFC3339WithLocalOffset(date) {
   try {
     if (!date || isNaN(date.getTime())) return new Date().toISOString();
@@ -21,20 +69,13 @@ function toRFC3339WithLocalOffset(date) {
     const offH = pad(Math.floor(abs / 60));
     const offM = pad(abs % 60);
     return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}${sign}${offH}:${offM}`;
-  } catch (e) {
-    return new Date().toISOString();
-  }
+  } catch (e) { return new Date().toISOString(); }
 }
 
 const formatPhone = (value) => {
   let v = String(value || '').replace(/\D/g, ''); 
-  if (v.length <= 10) {
-    v = v.replace(/^(\d{2})(\d)/g, '($1) $2');
-    v = v.replace(/(\d{4})(\d)/, '$1-$2');
-  } else {
-    v = v.replace(/^(\d{2})(\d)/g, '($1) $2');
-    v = v.replace(/(\d{5})(\d)/, '$1-$2');
-  }
+  if (v.length <= 10) { v = v.replace(/^(\d{2})(\d)/g, '($1) $2'); v = v.replace(/(\d{4})(\d)/, '$1-$2'); } 
+  else { v = v.replace(/^(\d{2})(\d)/g, '($1) $2'); v = v.replace(/(\d{5})(\d)/, '$1-$2'); }
   return v.slice(0, 15);
 };
 
@@ -55,20 +96,16 @@ const WEEKDAYS = [
 ];
 
 export default function App() {
-  // === SISTEMA DE AUTENTICAÇÃO E PERFIS ===
   const [authUser, setAuthUser] = useState(() => {
-    try {
-      const saved = localStorage.getItem('ouvidoria_user');
-      return saved ? JSON.parse(saved) : null;
-    } catch { return null; }
+    try { const saved = localStorage.getItem('ouvidoria_user'); return saved ? JSON.parse(saved) : null; } 
+    catch { return null; }
   });
   
   const [loginForm, setLoginForm] = useState({ email: '', senha: '' });
   const [isLoggingIn, setIsLoggingIn] = useState(false);
-
   const isAdmin = authUser?.perfil?.toLowerCase() === 'admin' || String(authUser?.email).toLowerCase().includes('admin');
 
-  // === ESTADOS DA INTERFACE ===
+  // Padrão de ecrã para utilizadores normais é 'sheets', ecrã 'office' está restrito
   const [view, setView] = useState('sheets'); 
   const [events, setEvents] = useState([]);
   const [slots, setSlots] = useState([]);
@@ -82,67 +119,125 @@ export default function App() {
   const [darkMode, setDarkMode] = useState(false);
   const [toast, setToast] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
-  
   const todayStr = new Date().toISOString().split('T')[0];
   const [activeDate, setActiveDate] = useState(todayStr); 
 
   const [deleteConfirm, setDeleteConfirm] = useState({ isOpen: false, id: null, title: '', type: 'event' });
   const [rescheduleData, setRescheduleData] = useState({ active: false, eventId: null, oldName: '', oldEmail: '', oldPhone: '' });
-
   const [selectedSlotForBooking, setSelectedSlotForBooking] = useState(null);
   const [formData, setFormData] = useState({ nome: '', email: '', telefone: '', assunto: '' });
-  
-  const [slotData, setSlotData] = useState({ 
-    startDate: todayStr, 
-    endDate: '', 
-    weekdays: [1, 2, 3, 4, 5],
-    times: [], 
-    atendentes: [] 
-  });
+  const [slotData, setSlotData] = useState({ startDate: todayStr, endDate: '', weekdays: [1, 2, 3, 4, 5], times: [], atendentes: [] });
   const [newAtendente, setNewAtendente] = useState('');
   const [progressData, setProgressData] = useState({ active: false, current: 0, total: 0, message: '' });
+
+  // === ESTADOS DO ESCRITÓRIO VIRTUAL ===
+  const [onlinePlayers, setOnlinePlayers] = useState([]);
+  const [myPos, setMyPos] = useState({ x: 10, y: 9 }); 
+  const [facing, setFacing] = useState('down'); 
 
   const safeEvents = Array.isArray(events) ? events : [];
   const safeSlots = Array.isArray(slots) ? slots : [];
   const uniqueAtendentes = [...new Set(safeSlots.map(s => String(s?.atendente || s?.Atendente || '')).filter(a => a.trim() !== '' && a !== 'undefined' && a !== 'null'))];
 
+  // === MULTIPLAYER E MOVIMENTO ===
+  useEffect(() => {
+    // Apenas liga a sincronização de jogadores se o utilizador for Admin (já que apenas admins têm acesso)
+    if (!authUser || !isAdmin) return;
+    let unsub = () => {};
+    let intervalId;
+
+    const setupMultiplayer = async () => {
+      try {
+        if (app && auth && db) {
+          if (!auth.currentUser) await signInAnonymously(auth);
+          const myUid = auth.currentUser.uid;
+          const myDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'office_users', myUid);
+          
+          await setDoc(myDocRef, { nome: authUser.nome || authUser.email, perfil: 'admin', x: myPos.x, y: myPos.y, lastActive: Date.now() }, { merge: true });
+
+          const usersRef = collection(db, 'artifacts', appId, 'public', 'data', 'office_users');
+          unsub = onSnapshot(usersRef, (snapshot) => {
+            const active = [];
+            const now = Date.now();
+            snapshot.forEach(doc => {
+              const data = doc.data();
+              if (now - data.lastActive < 5 * 60 * 1000) active.push({ id: doc.id, ...data });
+            });
+            setOnlinePlayers(active);
+          });
+          intervalId = setInterval(() => { if(auth.currentUser) setDoc(myDocRef, { lastActive: Date.now() }, { merge: true }); }, 30000);
+        }
+      } catch (err) {}
+    };
+    setupMultiplayer();
+    return () => { unsub(); if(intervalId) clearInterval(intervalId); };
+  }, [authUser, isAdmin]);
+
+  useEffect(() => {
+    if (view !== 'office' || !isAdmin) return; 
+
+    const handleKeyDown = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      const keys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'w', 'W', 's', 'S', 'a', 'A', 'd', 'D'];
+      
+      if (keys.includes(e.key)) {
+        e.preventDefault(); 
+        
+        setMyPos(prev => {
+          let nx = prev.x;
+          let ny = prev.y;
+          
+          if (['ArrowUp', 'w', 'W'].includes(e.key)) { ny -= 1; setFacing('up'); }
+          else if (['ArrowDown', 's', 'S'].includes(e.key)) { ny += 1; setFacing('down'); }
+          else if (['ArrowLeft', 'a', 'A'].includes(e.key)) { nx -= 1; setFacing('left'); }
+          else if (['ArrowRight', 'd', 'D'].includes(e.key)) { nx += 1; setFacing('right'); }
+
+          if (ny >= 0 && ny < MAP_H && nx >= 0 && nx < MAP_W) {
+            const tile = OFFICE_MAP[ny][nx];
+            // Pisos caminháveis: 0(Madeira), 3(Tapete), 6(Sofá), 8(Cadeira)
+            if ([0, 3, 6, 8].includes(tile)) { 
+              if (app && auth?.currentUser && db) {
+                const myDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'office_users', auth.currentUser.uid);
+                setDoc(myDocRef, { x: nx, y: ny, lastActive: Date.now() }, { merge: true });
+              }
+              return { x: nx, y: ny };
+            }
+          }
+          return prev;
+        });
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown, { passive: false });
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [view, isAdmin]);
+
+  const myUid = auth?.currentUser?.uid || 'local-user';
+  const otherPlayers = onlinePlayers.filter(p => p.id !== myUid);
+  const meAsPlayer = { id: myUid, nome: authUser?.nome || authUser?.email || 'Eu', perfil: isAdmin ? 'admin' : 'user', x: myPos.x, y: myPos.y, isMe: true };
+  const playersToRender = [...otherPlayers, meAsPlayer].sort((a,b) => a.y - b.y); 
+
   // === FUNÇÕES CORE ===
-  const showToast = useCallback((message, type = 'success') => { 
-    setToast({ message: String(message), type }); 
-    setTimeout(() => setToast(null), 5000); 
-  }, []);
+  const showToast = useCallback((message, type = 'success') => { setToast({ message: String(message), type }); setTimeout(() => setToast(null), 5000); }, []);
 
   const callN8N = useCallback(async (action, payload = {}) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15000); 
-
     try {
-      const res = await fetch(WEBHOOK_URL, { 
-        method: 'POST', 
-        headers: { 'Content-Type': 'application/json' }, 
-        mode: 'cors', 
-        body: JSON.stringify({ action, ...payload }),
-        signal: controller.signal
-      });
+      const res = await fetch(WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, mode: 'cors', body: JSON.stringify({ action, ...payload }), signal: controller.signal });
       clearTimeout(timeoutId);
       const data = await res.json().catch(() => null);
-
-      if (res.status === 401) { throw new Error("Acesso Negado. E-mail ou Senha incorretos."); }
+      if (res.status === 401) throw new Error("Acesso Negado. E-mail ou Senha incorretos."); 
       if (!res.ok) {
-        if (res.status === 409) { throw new Error(data?.error || "Vaga indisponível ou em conflito."); }
+        if (res.status === 409) throw new Error(data?.error || "Vaga indisponível ou em conflito.");
         throw new Error(data?.error || `Erro do Servidor (HTTP ${res.status}).`);
       }
       return data;
     } catch (err) { 
       clearTimeout(timeoutId);
       const errorStr = String(err.message).toLowerCase();
-      if (err.name === 'AbortError' || errorStr.includes('abort')) {
-        showToast("O servidor demorou a responder.", "error");
-      } else if (errorStr.includes('failed to fetch') || errorStr.includes('cors')) {
-        showToast("Falha de Conexão com o n8n.", "error");
-      } else {
-        showToast(err.message, "error"); 
-      }
+      if (err.name === 'AbortError' || errorStr.includes('abort')) showToast("O servidor demorou a responder.", "error");
+      else if (errorStr.includes('failed to fetch') || errorStr.includes('cors')) showToast("Falha de Conexão com o n8n.", "error");
+      else showToast(err.message, "error"); 
       return null; 
     } 
   }, [showToast]);
@@ -150,24 +245,15 @@ export default function App() {
   const handleLogin = async (e) => {
     e.preventDefault();
     if (!loginForm.email || !loginForm.senha) return showToast("Preencha todos os campos.", "error");
-    
     setIsLoggingIn(true);
     const res = await callN8N('login', { email: loginForm.email.trim(), senha: loginForm.senha });
     setIsLoggingIn(false);
-
     if (res && res.ok) {
-      setAuthUser(res.user);
-      localStorage.setItem('ouvidoria_user', JSON.stringify(res.user));
-      showToast(`Bem-vindo(a), ${res.user.nome || 'Usuário'}!`, "success");
+      setAuthUser(res.user); localStorage.setItem('ouvidoria_user', JSON.stringify(res.user)); showToast(`Bem-vindo(a), ${res.user.nome || 'Usuário'}!`, "success");
     }
   };
 
-  const handleLogout = () => {
-    setAuthUser(null);
-    localStorage.removeItem('ouvidoria_user');
-    setEvents([]);
-    setSlots([]);
-  };
+  const handleLogout = () => { setAuthUser(null); localStorage.removeItem('ouvidoria_user'); setEvents([]); setSlots([]); };
 
   const fetchData = useCallback(async () => {
     if (!authUser) return; 
@@ -187,345 +273,122 @@ export default function App() {
       else if (resEvents && resEvents.data && Array.isArray(resEvents.data.items)) setEvents(resEvents.data.items);
       else if (resEvents && resEvents.data && typeof resEvents.data === 'object') setEvents([resEvents.data]); 
       else setEvents([]);
-    } catch (error) {
-      console.error("Erro no fetchData:", error);
-    } finally {
-      setLoading(false);
-    }
+    } catch (error) {} finally { setLoading(false); }
   }, [callN8N, authUser]);
 
-  useEffect(() => { 
-    if (authUser) fetchData(); 
-  }, [fetchData, authUser]);
+  useEffect(() => { if (authUser) fetchData(); }, [fetchData, authUser]);
 
-  // --- NAVEGAÇÃO DE DATAS E MODAIS ---
-  const shiftDate = (days) => {
-    const d = new Date(activeDate + 'T12:00:00'); 
-    d.setDate(d.getDate() + days);
-    setActiveDate(d.toISOString().split('T')[0]);
-  };
-
+  // --- LÓGICA DE AGENDAMENTO E DATAS ---
+  const shiftDate = (days) => { const d = new Date(activeDate + 'T12:00:00'); d.setDate(d.getDate() + days); setActiveDate(d.toISOString().split('T')[0]); };
   const getDisplayDateLabel = () => {
     if (activeDate === todayStr) return "Hoje";
-    const amanhã = new Date(todayStr + 'T12:00:00'); 
-    amanhã.setDate(amanhã.getDate() + 1);
-    if (activeDate === amanhã.toISOString().split('T')[0]) return "Amanhã";
-    const ontem = new Date(todayStr + 'T12:00:00'); 
-    ontem.setDate(ontem.getDate() - 1);
-    if (activeDate === ontem.toISOString().split('T')[0]) return "Ontem";
-    
-    const d = new Date(activeDate + 'T12:00:00');
-    return d.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' }).replace('.', '');
+    const amanhã = new Date(todayStr + 'T12:00:00'); amanhã.setDate(amanhã.getDate() + 1); if (activeDate === amanhã.toISOString().split('T')[0]) return "Amanhã";
+    const ontem = new Date(todayStr + 'T12:00:00'); ontem.setDate(ontem.getDate() - 1); if (activeDate === ontem.toISOString().split('T')[0]) return "Ontem";
+    return new Date(activeDate + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' }).replace('.', '');
   };
+  const getSafeDateRender = (startObj) => { try { const s = startObj?.dateTime || startObj?.date; if (!s) return "Sem data definida"; const d = new Date(s); if (isNaN(d.getTime())) return "Data inválida"; return d.toLocaleString('pt-PT', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }); } catch { return "Erro"; } };
 
-  const handleOpenBookingModal = (slot) => {
-    setSelectedSlotForBooking(slot);
-    if (rescheduleData.active) {
-      setFormData({ nome: rescheduleData.oldName, email: rescheduleData.oldEmail, telefone: rescheduleData.oldPhone, assunto: 'Remarcação' });
-    } else if (!formData.nome) { 
-      setFormData({ nome: '', email: '', telefone: '', assunto: '' }); 
-    }
-    setIsModalOpen(true);
-  };
+  const handleOpenBookingModal = (slot) => { setSelectedSlotForBooking(slot); if (rescheduleData.active) { setFormData({ nome: rescheduleData.oldName, email: rescheduleData.oldEmail, telefone: rescheduleData.oldPhone, assunto: 'Remarcação' }); } else if (!formData.nome) { setFormData({ nome: '', email: '', telefone: '', assunto: '' }); } setIsModalOpen(true); };
 
   const handleSubmitBooking = async (e) => {
-    e.preventDefault();
-    if (!selectedSlotForBooking) return;
-    
-    if (formData.email && formData.email.trim() !== '' && !isValidEmail(formData.email)) {
-       return showToast("E-mail inválido. Deixe em branco ou insira um válido.", "error");
-    }
+    e.preventDefault(); if (!selectedSlotForBooking) return;
+    if (formData.email && formData.email.trim() !== '' && !isValidEmail(formData.email)) return showToast("E-mail inválido.", "error");
     if (formData.telefone.replace(/\D/g, '').length < 10) return showToast("Telefone incompleto.", "error");
 
-    setLoading(true);
-    let day = new Date().getDate(), month = new Date().getMonth() + 1, year = new Date().getFullYear();
-    try {
-      const rawData = String(selectedSlotForBooking.data || '').trim();
-      if (rawData.includes('/')) {
-        const p = rawData.split('/');
-        if (p[2].length >= 4) { day = p[0]; month = p[1]; year = p[2]; } else { year = p[0]; month = p[1]; day = p[2]; } 
-      } else if (rawData.includes('-')) {
-        const p = rawData.split('-');
-        if (p[0].length >= 4) { year = p[0]; month = p[1]; day = p[2]; } else { day = p[0]; month = p[1]; year = p[2]; } 
-      }
-    } catch (error) {}
-
-    const timeParts = String(selectedSlotForBooking.horario || '08:00').split(':');
-    const start = new Date(year, month - 1, day, parseInt(timeParts[0] || '8', 10), parseInt(timeParts[1] || '0', 10));
-    const end = new Date(start.getTime() + 120 * 60000);
+    setLoading(true); let day = new Date().getDate(), month = new Date().getMonth() + 1, year = new Date().getFullYear();
+    try { const rawData = String(selectedSlotForBooking.data || '').trim(); if (rawData.includes('/')) { const p = rawData.split('/'); if (p[2].length >= 4) { day = p[0]; month = p[1]; year = p[2]; } else { year = p[0]; month = p[1]; day = p[2]; } } else if (rawData.includes('-')) { const p = rawData.split('-'); if (p[0].length >= 4) { year = p[0]; month = p[1]; day = p[2]; } else { day = p[0]; month = p[1]; year = p[2]; } } } catch (error) {}
+    const timeParts = String(selectedSlotForBooking.horario || '08:00').split(':'); const start = new Date(year, month - 1, day, parseInt(timeParts[0] || '8', 10), parseInt(timeParts[1] || '0', 10)); const end = new Date(start.getTime() + 120 * 60000);
 
     const previousSlots = [...safeSlots];
     setSlots(prev => prev.map(s => s.id === selectedSlotForBooking.id ? { ...s, status: 'Ocupado', nome_cliente: formData.nome, contato_cliente: `${formData.email || ''} | ${formData.telefone}`, assunto: formData.assunto } : s));
-    setIsModalOpen(false); 
-    
-    setProgressData({ active: true, current: 0, total: 1, message: `A agendar ${formData.nome}...` });
+    setIsModalOpen(false); setProgressData({ active: true, current: 0, total: 1, message: `A agendar ${formData.nome}...` });
 
-    const calResult = await callN8N('create', { 
-      inicio: toRFC3339WithLocalOffset(start), fim: toRFC3339WithLocalOffset(end),
-      nome: formData.nome, email: formData.email || '', telefone: formData.telefone, assunto: formData.assunto,
-      atendente: selectedSlotForBooking.atendente || selectedSlotForBooking.Atendente || 'Balcão',
-      usuario: authUser.nome || authUser.email
-    });
-
+    const calResult = await callN8N('create', { inicio: toRFC3339WithLocalOffset(start), fim: toRFC3339WithLocalOffset(end), nome: formData.nome, email: formData.email || '', telefone: formData.telefone, assunto: formData.assunto, atendente: selectedSlotForBooking.atendente || selectedSlotForBooking.Atendente || 'Balcão', usuario: authUser.nome || authUser.email });
     if (calResult) {
-      const sheetResult = await callN8N('update_slot', {
-        id: selectedSlotForBooking.id, data: selectedSlotForBooking.data || '', horario: selectedSlotForBooking.horario || '',
-        atendente: selectedSlotForBooking.atendente || selectedSlotForBooking.Atendente || '',
-        status: 'Ocupado', nome_cliente: formData.nome, contato_cliente: `${formData.email || 'Sem e-mail'} | ${formData.telefone}`, assunto: formData.assunto
-      });
-
+      const sheetResult = await callN8N('update_slot', { id: selectedSlotForBooking.id, data: selectedSlotForBooking.data || '', horario: selectedSlotForBooking.horario || '', atendente: selectedSlotForBooking.atendente || selectedSlotForBooking.Atendente || '', status: 'Ocupado', nome_cliente: formData.nome, contato_cliente: `${formData.email || 'Sem e-mail'} | ${formData.telefone}`, assunto: formData.assunto });
       if (sheetResult) {
         if (rescheduleData.active && rescheduleData.eventId) {
-           setProgressData(p => ({...p, message: "A remover agendamento antigo..."}));
-           setEvents(prev => prev.filter(ev => ev.id !== rescheduleData.eventId));
+           setProgressData(p => ({...p, message: "A remover agendamento antigo..."})); setEvents(prev => prev.filter(ev => ev.id !== rescheduleData.eventId));
            const oldSlot = safeSlots.find(s => s.contato_cliente && s.contato_cliente.includes(rescheduleData.oldEmail || rescheduleData.oldPhone) && s.status === 'Ocupado' && s.id !== selectedSlotForBooking.id);
-           
-           if (oldSlot) {
-             setSlots(prev => prev.map(s => s.id === oldSlot.id ? { ...s, status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' } : s));
-             await callN8N('update_slot', { 
-               id: oldSlot.id, data: oldSlot.data || '', horario: oldSlot.horario || '', atendente: oldSlot.atendente || oldSlot.Atendente || '',
-               status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' 
-             });
-           }
-
-           await callN8N('delete', { eventId: rescheduleData.eventId });
-           setRescheduleData({ active: false, eventId: null, oldName: '', oldEmail: '', oldPhone: '' });
-           showToast(`Remarcação confirmada!`, "success");
-        } else {
-           showToast(`Agendamento confirmado!`, "success"); 
-        }
-
-        setSelectedSlotForBooking(null);
-        setFormData({ nome: '', email: '', telefone: '', assunto: '' });
+           if (oldSlot) { setSlots(prev => prev.map(s => s.id === oldSlot.id ? { ...s, status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' } : s)); await callN8N('update_slot', { id: oldSlot.id, data: oldSlot.data || '', horario: oldSlot.horario || '', atendente: oldSlot.atendente || oldSlot.Atendente || '', status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' }); }
+           await callN8N('delete', { eventId: rescheduleData.eventId }); setRescheduleData({ active: false, eventId: null, oldName: '', oldEmail: '', oldPhone: '' }); showToast(`Remarcação confirmada!`, "success");
+        } else { showToast(`Agendamento confirmado!`, "success"); }
+        setSelectedSlotForBooking(null); setFormData({ nome: '', email: '', telefone: '', assunto: '' });
       } else { setSlots(previousSlots); showToast(`Erro ao gravar dados.`, "error"); }
     } else { setSlots(previousSlots); showToast(`Erro ao criar no calendário.`, "error"); }
-
-    setProgressData({ active: false, current: 0, total: 0, message: '' });
-    setLoading(false);
-    fetchData();
-  };
-
-  // --- SELETORES EM MASSA ---
-  const toggleTimeSelection = (time) => {
-    setSlotData(prev => ({
-      ...prev, 
-      times: prev.times.includes(time) ? prev.times.filter(t => t !== time) : [...prev.times, time].sort()
-    }));
-  };
-
-  const toggleWeekday = (id) => {
-    setSlotData(prev => ({
-      ...prev,
-      weekdays: prev.weekdays.includes(id) ? prev.weekdays.filter(d => d !== id) : [...prev.weekdays, id]
-    }));
-  };
-
-  const handleAddAtendenteToMassSlot = () => {
-    if (newAtendente.trim()) {
-      if (!slotData.atendentes.includes(newAtendente.trim())) {
-        setSlotData(p => ({...p, atendentes: [...p.atendentes, newAtendente.trim()]}));
-      }
-      setNewAtendente('');
-    }
-  };
-
-  const getDatesInRange = (start, end, weekdays) => {
-    let current = new Date(start + 'T12:00:00');
-    const endDate = new Date(end + 'T12:00:00');
-    const dates = [];
-    while (current <= endDate) {
-      if (weekdays.includes(current.getDay())) {
-        dates.push(current.toISOString().split('T')[0]);
-      }
-      current.setDate(current.getDate() + 1);
-    }
-    return dates;
+    setProgressData({ active: false, current: 0, total: 0, message: '' }); setLoading(false); fetchData();
   };
 
   const handleCreateMassSlots = async (e) => {
     e.preventDefault();
-    if (!slotData.startDate) return showToast("Selecione a Data Inicial.", "error");
-    if (slotData.atendentes.length === 0) return showToast("Adicione pelo menos um atendente!", "error");
-    if (slotData.times.length === 0) return showToast("Selecione pelo menos um horário!", "error");
+    if (!slotData.startDate) return showToast("Selecione a Data Inicial.", "error"); if (slotData.atendentes.length === 0) return showToast("Adicione um atendente!", "error"); if (slotData.times.length === 0) return showToast("Selecione um horário!", "error");
     
-    const datesToProcess = slotData.endDate 
-      ? getDatesInRange(slotData.startDate, slotData.endDate, slotData.weekdays) 
-      : [slotData.startDate];
-
-    if (datesToProcess.length === 0) return showToast("Nenhum dia válido encontrado.", "error");
+    let current = new Date(slotData.startDate + 'T12:00:00'); const endDate = new Date((slotData.endDate || slotData.startDate) + 'T12:00:00'); const datesToProcess = [];
+    while (current <= endDate) { if (slotData.weekdays.includes(current.getDay())) datesToProcess.push(current.toISOString().split('T')[0]); current.setDate(current.getDate() + 1); }
+    if (datesToProcess.length === 0) return showToast("Nenhum dia válido.", "error");
     
-    const totalTasks = datesToProcess.length * slotData.times.length * slotData.atendentes.length;
-    let sucessos = 0;
-    
-    setIsSlotModalOpen(false); 
-    setLoading(true);
-    setProgressData({ active: true, current: 0, total: totalTasks, message: 'A criar vagas no sistema...' });
+    const totalTasks = datesToProcess.length * slotData.times.length * slotData.atendentes.length; let sucessos = 0;
+    setIsSlotModalOpen(false); setLoading(true); setProgressData({ active: true, current: 0, total: totalTasks, message: 'A criar vagas...' });
     
     for (const dateIso of datesToProcess) {
-      const parts = dateIso.split('-');
-      const formattedData = `${parts[2]}/${parts[1]}/${parts[0]}`; 
-      
+      const parts = dateIso.split('-'); const formattedData = `${parts[2]}/${parts[1]}/${parts[0]}`; 
       for (const time of slotData.times) {
         for (const atendente of slotData.atendentes) {
-          sucessos++;
-          setProgressData(prev => ({ ...prev, current: sucessos }));
-          await callN8N('create_slot', { 
-            data: formattedData, horario: time, atendente: atendente,
-            status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: ''
-          });
+          sucessos++; setProgressData(prev => ({ ...prev, current: sucessos }));
+          await callN8N('create_slot', { data: formattedData, horario: time, atendente: atendente, status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' });
         }
       }
     }
-    
-    setProgressData({ active: false, current: 0, total: 0, message: '' });
-    showToast(`${sucessos} vagas geradas com sucesso!`, "success"); 
-    setSlotData({ startDate: todayStr, endDate: '', weekdays: [1, 2, 3, 4, 5], times: [], atendentes: [] });
-    setLoading(false);
-    fetchData(); 
+    setProgressData({ active: false, current: 0, total: 0, message: '' }); showToast(`${sucessos} vagas geradas!`, "success"); setSlotData({ startDate: todayStr, endDate: '', weekdays: [1, 2, 3, 4, 5], times: [], atendentes: [] }); setLoading(false); fetchData(); 
   };
 
   const handleUpdateAtendente = async (e) => {
-    e.preventDefault();
-    if (!editAtendenteModal.slotId) return;
-    
-    setLoading(true);
+    e.preventDefault(); if (!editAtendenteModal.slotId) return; setLoading(true);
     const slotToUpdate = safeSlots.find(s => s.id === editAtendenteModal.slotId);
-    if (!slotToUpdate) {
-      setLoading(false);
-      return showToast("Vaga não encontrada.", "error");
-    }
-
-    const previousSlots = [...safeSlots];
-    setSlots(prev => prev.map(s => s.id === editAtendenteModal.slotId ? { ...s, atendente: editAtendenteModal.currentName, Atendente: editAtendenteModal.currentName } : s));
-    
+    if (!slotToUpdate) { setLoading(false); return showToast("Vaga não encontrada.", "error"); }
+    const previousSlots = [...safeSlots]; setSlots(prev => prev.map(s => s.id === editAtendenteModal.slotId ? { ...s, atendente: editAtendenteModal.currentName, Atendente: editAtendenteModal.currentName } : s));
     setProgressData({ active: true, current: 0, total: 1, message: 'A atualizar atendente...' });
-    
-    const res = await callN8N('update_slot', { 
-      id: slotToUpdate.id, data: slotToUpdate.data || '', horario: slotToUpdate.horario || '',
-      atendente: editAtendenteModal.currentName, status: slotToUpdate.status || 'Livre', 
-      nome_cliente: slotToUpdate.nome_cliente || '', contato_cliente: slotToUpdate.contato_cliente || '', assunto: slotToUpdate.assunto || ''
-    });
-
+    const res = await callN8N('update_slot', { id: slotToUpdate.id, data: slotToUpdate.data || '', horario: slotToUpdate.horario || '', atendente: editAtendenteModal.currentName, status: slotToUpdate.status || 'Livre', nome_cliente: slotToUpdate.nome_cliente || '', contato_cliente: slotToUpdate.contato_cliente || '', assunto: slotToUpdate.assunto || '' });
     setProgressData({ active: false, current: 0, total: 0, message: '' });
-    
-    if (res) {
-      showToast("Atendente atualizado com sucesso!", "success");
-      setEditAtendenteModal({ isOpen: false, slotId: null, currentName: '' });
-    } else {
-      setSlots(previousSlots);
-      showToast("Erro ao atualizar atendente.", "error");
-    }
-    setLoading(false);
-    fetchData();
+    if (res) { showToast("Atualizado com sucesso!", "success"); setEditAtendenteModal({ isOpen: false, slotId: null, currentName: '' }); } else { setSlots(previousSlots); showToast("Erro.", "error"); }
+    setLoading(false); fetchData();
   };
 
-  // --- LÓGICA DE EXCLUSÃO (Com Regras de Perfil) ---
   const handleRequestDelete = async (id, type) => {
-    setDeleteConfirm({ isOpen: false, id: null, title: '', type: 'event' }); 
-    setProgressData({ active: true, current: 0, total: 1, message: 'A enviar solicitação de exclusão...' });
-
+    setDeleteConfirm({ isOpen: false, id: null, title: '', type: 'event' }); setProgressData({ active: true, current: 0, total: 1, message: 'A enviar solicitação...' });
     let slotToUpdate = null;
-    if (type === 'event') {
-      const eventToDelete = safeEvents.find(e => e.id === id);
-      const eventEmail = eventToDelete?.attendees?.[0]?.email;
-      slotToUpdate = safeSlots.find(s => s.contato_cliente && (s.contato_cliente.includes(eventEmail) || s.contato_cliente.includes(eventToDelete.summary)) && s.status === 'Ocupado');
-    } else {
-      slotToUpdate = safeSlots.find(s => s.id === id);
-    }
-
-    if (slotToUpdate) {
-      const res = await callN8N('update_slot', { 
-        id: slotToUpdate.id, data: slotToUpdate.data || '', horario: slotToUpdate.horario || '',
-        atendente: slotToUpdate.atendente || slotToUpdate.Atendente || '', 
-        status: 'Pendente Exclusão', 
-        nome_cliente: slotToUpdate.nome_cliente, contato_cliente: slotToUpdate.contato_cliente, assunto: slotToUpdate.assunto 
-      });
-      
-      if (res) showToast("Solicitação de exclusão enviada ao administrador!", "success");
-      else showToast("Erro ao enviar solicitação.", "error");
-    } else {
-      showToast("Vaga não encontrada para solicitação.", "error");
-    }
-    
-    setProgressData({ active: false, current: 0, total: 0, message: '' });
-    fetchData();
+    if (type === 'event') { const eventToDelete = safeEvents.find(e => e.id === id); const eventEmail = eventToDelete?.attendees?.[0]?.email; slotToUpdate = safeSlots.find(s => s.contato_cliente && (s.contato_cliente.includes(eventEmail) || s.contato_cliente.includes(eventToDelete.summary)) && s.status === 'Ocupado'); } else { slotToUpdate = safeSlots.find(s => s.id === id); }
+    if (slotToUpdate) { const res = await callN8N('update_slot', { id: slotToUpdate.id, data: slotToUpdate.data || '', horario: slotToUpdate.horario || '', atendente: slotToUpdate.atendente || slotToUpdate.Atendente || '', status: 'Pendente Exclusão', nome_cliente: slotToUpdate.nome_cliente, contato_cliente: slotToUpdate.contato_cliente, assunto: slotToUpdate.assunto }); if (res) showToast("Solicitação enviada!", "success"); else showToast("Erro.", "error"); } else { showToast("Vaga não encontrada.", "error"); }
+    setProgressData({ active: false, current: 0, total: 0, message: '' }); fetchData();
   };
 
   const handleRejectDeletion = async (slotId) => {
-    const slotToUpdate = safeSlots.find(s => s.id === slotId);
-    if (!slotToUpdate) return;
-    
-    setProgressData({ active: true, current: 0, total: 1, message: 'A rejeitar exclusão...' });
-
-    const res = await callN8N('update_slot', { 
-      id: slotToUpdate.id, data: slotToUpdate.data || '', horario: slotToUpdate.horario || '',
-      atendente: slotToUpdate.atendente || slotToUpdate.Atendente || '', 
-      status: 'Ocupado', 
-      nome_cliente: slotToUpdate.nome_cliente, contato_cliente: slotToUpdate.contato_cliente, assunto: slotToUpdate.assunto 
-    });
-
-    setProgressData({ active: false, current: 0, total: 0, message: '' });
-    if (res) showToast("Exclusão rejeitada. A vaga foi mantida.", "info");
-    fetchData();
+    const slotToUpdate = safeSlots.find(s => s.id === slotId); if (!slotToUpdate) return; setProgressData({ active: true, current: 0, total: 1, message: 'A rejeitar...' });
+    const res = await callN8N('update_slot', { id: slotToUpdate.id, data: slotToUpdate.data || '', horario: slotToUpdate.horario || '', atendente: slotToUpdate.atendente || slotToUpdate.Atendente || '', status: 'Ocupado', nome_cliente: slotToUpdate.nome_cliente, contato_cliente: slotToUpdate.contato_cliente, assunto: slotToUpdate.assunto });
+    setProgressData({ active: false, current: 0, total: 0, message: '' }); if (res) showToast("Rejeitada.", "info"); fetchData();
   };
 
   const handleDelete = async (id, type) => {
-    if (!isAdmin) return handleRequestDelete(id, type);
-
-    if (!id) return;
-    setDeleteConfirm({ isOpen: false, id: null, title: '', type: 'event' }); 
-
-    const prevEvents = [...safeEvents];
-    const prevSlots = [...safeSlots];
-    setProgressData({ active: true, current: 0, total: 1, message: 'A processar exclusão...' });
-
+    if (!isAdmin) return handleRequestDelete(id, type); if (!id) return;
+    setDeleteConfirm({ isOpen: false, id: null, title: '', type: 'event' }); setProgressData({ active: true, current: 0, total: 1, message: 'A excluir...' });
     if (type === 'event') {
-      const eventToDelete = safeEvents.find(e => e.id === id);
-      const eventEmail = eventToDelete?.attendees?.[0]?.email;
-
-      setEvents(prev => prev.filter(e => e.id !== id));
-      const res = await callN8N('delete', { eventId: id });
-      if (!res) { setEvents(prevEvents); setProgressData({active:false, current:0, total:0, message:''}); return; }
-
-      // Procura a vaga para libertar pelo email ou, na falta dele, pelo resumo
-      const matchingSlot = safeSlots.find(s => 
-        s.contato_cliente && 
-        (s.contato_cliente.includes(eventEmail) || (eventToDelete.summary && s.contato_cliente.includes(eventToDelete.summary))) && 
-        (s.status === 'Ocupado' || s.status === 'Pendente Exclusão')
-      );
-
-      if (matchingSlot) {
-        setSlots(prev => prev.map(s => s.id === matchingSlot.id ? { ...s, status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' } : s));
-        await callN8N('update_slot', { 
-          id: matchingSlot.id, data: matchingSlot.data || '', horario: matchingSlot.horario || '',
-          atendente: matchingSlot.atendente || matchingSlot.Atendente || '', status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' 
-        });
-      }
-      showToast("Agendamento excluído definitivamente!");
-
+      const eventToDelete = safeEvents.find(e => e.id === id); const eventEmail = eventToDelete?.attendees?.[0]?.email; setEvents(prev => prev.filter(e => e.id !== id));
+      const res = await callN8N('delete', { eventId: id }); if (!res) { setEvents([...safeEvents]); setProgressData({active:false, current:0, total:0, message:''}); return; }
+      const matchingSlot = safeSlots.find(s => s.contato_cliente && (s.contato_cliente.includes(eventEmail) || (eventToDelete.summary && s.contato_cliente.includes(eventToDelete.summary))) && (s.status === 'Ocupado' || s.status === 'Pendente Exclusão'));
+      if (matchingSlot) { setSlots(prev => prev.map(s => s.id === matchingSlot.id ? { ...s, status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' } : s)); await callN8N('update_slot', { id: matchingSlot.id, data: matchingSlot.data || '', horario: matchingSlot.horario || '', atendente: matchingSlot.atendente || matchingSlot.Atendente || '', status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' }); }
+      showToast("Agendamento excluído!");
     } else if (type === 'slot') {
       const slotToDelete = safeSlots.find(s => s.id === id);
-
       if (slotToDelete?.status === 'Ocupado' || slotToDelete?.status === 'Pendente Exclusão') {
         setSlots(prev => prev.map(s => s.id === id ? { ...s, status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' } : s));
-        
-        const res = await callN8N('update_slot', { 
-          id: id, data: slotToDelete.data || '', horario: slotToDelete.horario || '',
-          atendente: slotToDelete.atendente || slotToDelete.Atendente || '', status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' 
-        });
-        if (!res) { setSlots(prevSlots); setProgressData({active:false, current:0, total:0, message:''}); return; }
-
+        const res = await callN8N('update_slot', { id: id, data: slotToDelete.data || '', horario: slotToDelete.horario || '', atendente: slotToDelete.atendente || slotToDelete.Atendente || '', status: 'Livre', nome_cliente: '', contato_cliente: '', assunto: '' });
+        if (!res) { setSlots([...safeSlots]); setProgressData({active:false, current:0, total:0, message:''}); return; }
         const matchingEvent = safeEvents.find(e => e.attendees?.[0]?.email && slotToDelete.contato_cliente && slotToDelete.contato_cliente.includes(e.attendees[0].email));
-        if (matchingEvent) {
-          setEvents(prev => prev.filter(e => e.id !== matchingEvent.id));
-          await callN8N('delete', { eventId: matchingEvent.id });
-        }
-        showToast("Vaga libertada com sucesso!");
+        if (matchingEvent) { setEvents(prev => prev.filter(e => e.id !== matchingEvent.id)); await callN8N('delete', { eventId: matchingEvent.id }); }
+        showToast("Vaga libertada!");
       } else {
         setSlots(prev => prev.map(s => s.id === id ? { ...s, status: 'Excluído' } : s));
-        const res = await callN8N('delete_slot', { id });
-        if (!res) { setSlots(prevSlots); setProgressData({active:false, current:0, total:0, message:''}); return; } 
-        showToast("Vaga removida definitivamente da grelha.");
+        const res = await callN8N('delete_slot', { id }); if (!res) { setSlots([...safeSlots]); setProgressData({active:false, current:0, total:0, message:''}); return; } showToast("Vaga removida da grelha.");
       }
     }
     setProgressData({ active: false, current: 0, total: 0, message: '' });
@@ -551,65 +414,13 @@ export default function App() {
     showToast("Modo Remarcação. Escolha a nova vaga.", "info");
   };
 
-  const getSafeDateRender = (startObj) => {
-    try {
-      const s = startObj?.dateTime || startObj?.date;
-      if (!s) return "Sem data definida";
-      const d = new Date(s);
-      if (isNaN(d.getTime())) return "Data inválida";
-      return d.toLocaleString('pt-PT', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
-    } catch { return "Erro"; }
-  };
-
   const isSearching = searchTerm.trim().length > 0;
-
-  const filteredEvents = safeEvents.filter(e => {
-    if (!e || typeof e !== 'object' || e.status === 'cancelled') return false;
-    const search = String(searchTerm || '').toLowerCase();
-    const summary = String(e.summary || '').toLowerCase();
-    const matchesSearch = summary.includes(search);
-    
-    let eventDate = '';
-    if (e.start?.dateTime) eventDate = String(e.start.dateTime).split('T')[0];
-    else if (e.start?.date) eventDate = String(e.start.date);
-    
-    if (isSearching) return matchesSearch;
-    return eventDate === activeDate;
-  });
-
-  const filteredSlots = safeSlots.filter(s => {
-    if (!s || typeof s !== 'object' || s.status === 'Excluído') return false;
-    const search = String(searchTerm || '').toLowerCase();
-    const matchesSearch = String(s.horario || '').includes(search) || 
-                          String(s.nome_cliente || '').toLowerCase().includes(search) || 
-                          String(s.atendente || s.Atendente || '').toLowerCase().includes(search) ||
-                          String(s.contato_cliente || '').toLowerCase().includes(search) ||
-                          String(s.assunto || '').toLowerCase().includes(search);
-                          
-    const parts = String(s.data || '').split('/');
-    const slotIso = parts.length === 3 ? `${parts[2]}-${parts[1]}-${parts[0]}` : '';
-    
-    if (isSearching) return matchesSearch;
-    return slotIso === activeDate;
-  });
+  const filteredEvents = safeEvents.filter(e => { if (!e || typeof e !== 'object' || e.status === 'cancelled') return false; const search = String(searchTerm || '').toLowerCase(); const summary = String(e.summary || '').toLowerCase(); if (isSearching) return summary.includes(search); return (e.start?.dateTime ? String(e.start.dateTime).split('T')[0] : String(e.start?.date)) === activeDate; });
+  const filteredSlots = safeSlots.filter(s => { if (!s || typeof s !== 'object' || s.status === 'Excluído') return false; const search = String(searchTerm || '').toLowerCase(); if (isSearching) return String(s.horario || '').includes(search) || String(s.nome_cliente || '').toLowerCase().includes(search) || String(s.atendente || s.Atendente || '').toLowerCase().includes(search); const parts = String(s.data || '').split('/'); return `${parts[2]}-${parts[1]}-${parts[0]}` === activeDate; });
 
   const extractEventDetails = (event) => {
-    if (!event) return {};
-    const desc = String(event.description || '');
-    const nameMatch = desc.match(/Solicitante:\s*(.+)/);
-    const telMatch = desc.match(/Telefone:\s*(.+)/);
-    const atendenteMatch = desc.match(/Atendente:\s*(.+)/);
-    const usuarioMatch = desc.match(/Agendado por:\s*(.+)/);
-
-    return {
-      nome: nameMatch ? nameMatch[1].trim() : '',
-      telefone: telMatch ? telMatch[1].trim() : 'Não informado',
-      email: event.attendees?.[0]?.email || 'Não informado',
-      assunto: String(event.summary || '(Sem Título)'),
-      data: getSafeDateRender(event.start),
-      atendente: atendenteMatch ? atendenteMatch[1].trim() : 'Balcão',
-      usuario: usuarioMatch ? usuarioMatch[1].trim() : 'Sistema'
-    };
+    if (!event) return {}; const desc = String(event.description || ''); const nameMatch = desc.match(/Solicitante:\s*(.+)/); const telMatch = desc.match(/Telefone:\s*(.+)/); const atendenteMatch = desc.match(/Atendente:\s*(.+)/); const usuarioMatch = desc.match(/Agendado por:\s*(.+)/); let ds = event.start?.dateTime || event.start?.date; let dStr = "Sem data"; try { if (ds && !isNaN(new Date(ds).getTime())) dStr = new Date(ds).toLocaleString('pt-PT', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }); } catch {}
+    return { nome: nameMatch ? nameMatch[1].trim() : '', telefone: telMatch ? telMatch[1].trim() : 'Não informado', email: event.attendees?.[0]?.email || 'Não informado', assunto: String(event.summary || '(Sem Título)'), data: dStr, atendente: atendenteMatch ? atendenteMatch[1].trim() : 'Balcão', usuario: usuarioMatch ? usuarioMatch[1].trim() : 'Sistema' };
   };
 
   // ==========================================
@@ -640,26 +451,16 @@ export default function App() {
               <label className={`block text-xs font-bold uppercase tracking-widest mb-2 ml-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>E-mail do Utilizador</label>
               <div className="relative">
                 <User className={`absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`} />
-                <input 
-                  required type="email" placeholder="admin@tjrr.jus.br" 
-                  value={loginForm.email} onChange={e => setLoginForm({...loginForm, email: e.target.value})}
-                  className={`w-full pl-12 pr-4 py-4 rounded-2xl border text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-900 focus:border-indigo-500 focus:bg-white'}`} 
-                />
+                <input required type="email" placeholder="admin@tjrr.jus.br" value={loginForm.email} onChange={e => setLoginForm({...loginForm, email: e.target.value})} className={`w-full pl-12 pr-4 py-4 rounded-2xl border text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-900 focus:border-indigo-500 focus:bg-white'}`} />
               </div>
             </div>
-            
             <div>
               <label className={`block text-xs font-bold uppercase tracking-widest mb-2 ml-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Senha de Acesso</label>
               <div className="relative">
                 <Lock className={`absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`} />
-                <input 
-                  required type="password" placeholder="••••••" 
-                  value={loginForm.senha} onChange={e => setLoginForm({...loginForm, senha: e.target.value})}
-                  className={`w-full pl-12 pr-4 py-4 rounded-2xl border text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-900 focus:border-indigo-500 focus:bg-white'}`} 
-                />
+                <input required type="password" placeholder="••••••" value={loginForm.senha} onChange={e => setLoginForm({...loginForm, senha: e.target.value})} className={`w-full pl-12 pr-4 py-4 rounded-2xl border text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-900 focus:border-indigo-500 focus:bg-white'}`} />
               </div>
             </div>
-
             <button disabled={isLoggingIn} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-4 rounded-2xl font-black text-lg mt-4 shadow-xl shadow-indigo-600/30 transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-70">
               {isLoggingIn ? <Loader2 className="animate-spin" size={24} /> : 'Entrar no Sistema'}
             </button>
@@ -713,83 +514,286 @@ export default function App() {
           </div>
         </div>
 
-        <div className="max-w-md mx-auto px-4 pb-4 flex gap-2 mt-1">
-          <button onClick={() => setView('sheets')} className={`flex-1 py-2.5 sm:py-3 text-xs sm:text-sm font-bold rounded-xl transition-all duration-300 ${view === 'sheets' ? (darkMode ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'bg-slate-800 text-white shadow-lg shadow-slate-800/20') : (darkMode ? 'bg-slate-900 text-slate-400 hover:bg-slate-800' : 'bg-slate-100 text-slate-500 hover:bg-slate-200')}`}>
-            Vagas da Planilha
+        {/* ABAS DE NAVEGAÇÃO */}
+        <div className="max-w-2xl mx-auto px-4 pb-4 flex gap-2 mt-1">
+          <button onClick={() => setView('sheets')} className={`flex-1 py-2.5 sm:py-3 text-[10px] sm:text-xs md:text-sm font-bold rounded-xl transition-all duration-300 flex items-center justify-center gap-1 sm:gap-2 ${view === 'sheets' ? (darkMode ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'bg-slate-800 text-white shadow-lg shadow-slate-800/20') : (darkMode ? 'bg-slate-900 text-slate-400 hover:bg-slate-800' : 'bg-slate-100 text-slate-500 hover:bg-slate-200')}`}>
+             <CalendarDays size={16} /> Vagas
           </button>
-          <button onClick={() => setView('calendar')} className={`flex-1 py-2.5 sm:py-3 text-xs sm:text-sm font-bold rounded-xl transition-all duration-300 ${view === 'calendar' ? (darkMode ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'bg-slate-800 text-white shadow-lg shadow-slate-800/20') : (darkMode ? 'bg-slate-900 text-slate-400 hover:bg-slate-800' : 'bg-slate-100 text-slate-500 hover:bg-slate-200')}`}>
-            Eventos Agendados
+          <button onClick={() => setView('calendar')} className={`flex-1 py-2.5 sm:py-3 text-[10px] sm:text-xs md:text-sm font-bold rounded-xl transition-all duration-300 flex items-center justify-center gap-1 sm:gap-2 ${view === 'calendar' ? (darkMode ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'bg-slate-800 text-white shadow-lg shadow-slate-800/20') : (darkMode ? 'bg-slate-900 text-slate-400 hover:bg-slate-800' : 'bg-slate-100 text-slate-500 hover:bg-slate-200')}`}>
+             <Calendar size={16} /> Agendados
           </button>
+          
+          {/* BOTÃO VISÍVEL APENAS PARA ADMINS */}
+          {isAdmin && (
+            <button onClick={() => setView('office')} className={`flex-1 py-2.5 sm:py-3 text-[10px] sm:text-xs md:text-sm font-bold rounded-xl transition-all duration-300 flex items-center justify-center gap-1 sm:gap-2 ${view === 'office' ? (darkMode ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20' : 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20') : (darkMode ? 'bg-slate-900 text-slate-400 hover:bg-slate-800' : 'bg-slate-100 text-slate-500 hover:bg-slate-200')}`}>
+               <MonitorSmartphone size={16} /> Escritório Virtual
+            </button>
+          )}
         </div>
       </header>
 
       <main className="max-w-5xl mx-auto px-3 sm:px-4 py-6 sm:py-8 space-y-5 sm:space-y-6 pb-32">
         
-        {rescheduleData.active && (
-          <div className={`p-4 sm:p-5 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-lg animate-in slide-in-from-top-4 ${darkMode ? 'bg-indigo-900/40 border border-indigo-500/30' : 'bg-indigo-50 border border-indigo-200'}`}>
-             <div className="flex items-center gap-3 sm:gap-4">
-                <div className={`p-2 rounded-full shrink-0 ${darkMode ? 'bg-indigo-500/20 text-indigo-400' : 'bg-indigo-200 text-indigo-700'}`}>
-                  <Info size={20} />
-                </div>
-                <div>
-                  <p className={`text-[10px] sm:text-xs font-bold uppercase tracking-widest ${darkMode ? 'text-indigo-400' : 'text-indigo-600'}`}>Modo Remarcação</p>
-                  <p className={`font-semibold text-xs sm:text-sm ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
-                    Escolha a nova vaga para <strong className="font-black">{rescheduleData.oldName || rescheduleData.oldEmail}</strong>
-                  </p>
-                </div>
-             </div>
-             <button onClick={() => setRescheduleData({active: false, eventId: null, oldName: '', oldEmail: '', oldPhone: ''})} className={`px-4 sm:px-6 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-colors w-full sm:w-auto shadow-sm ${darkMode ? 'bg-slate-800 text-slate-300 hover:bg-slate-700' : 'bg-white text-slate-700 hover:bg-slate-50'}`}>
-               Cancelar
-             </button>
+        {/* === MODO ESCRITÓRIO VIRTUAL (PIXEL ART RPG) - ADMIN ONLY === */}
+        {view === 'office' && isAdmin && (
+          <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 flex flex-col items-center">
+            
+            <div className={`w-full max-w-4xl p-6 rounded-[2rem] shadow-xl mb-6 border flex flex-col sm:flex-row items-center justify-between gap-4 ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
+               <div>
+                 <h2 className="font-black text-2xl mb-1 flex items-center gap-2"><MonitorSmartphone className="text-emerald-500" /> Escritório Online</h2>
+                 <p className={`text-sm font-semibold ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Mova o seu avatar com as <strong className={darkMode ? 'text-white' : 'text-slate-800'}>Setas do Teclado (ou WASD)</strong>.</p>
+               </div>
+               <div className="flex gap-4">
+                  <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest"><div className="w-3 h-3 rounded-full bg-amber-500 border border-white"></div> Admins</div>
+                  <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest"><div className="w-3 h-3 rounded-full bg-indigo-500 border border-white"></div> Equipa</div>
+               </div>
+            </div>
+
+            {/* O MAPA (Renderizado com CSS Customizado para Pixel Art) */}
+            <div 
+               className={`relative overflow-hidden rounded-[1rem] sm:rounded-[2rem] shadow-[0_20px_50px_rgba(0,0,0,0.4)] border-[8px] border-slate-800 w-full max-w-5xl touch-none ${darkMode ? 'bg-slate-900' : 'bg-slate-100'}`} 
+               style={{ aspectRatio: `${MAP_W} / ${MAP_H}`, imageRendering: 'pixelated' }}
+            >
+               {/* Camada Base: Iluminação/Ambiente Global */}
+               <div className="absolute inset-0 bg-indigo-900/10 mix-blend-multiply z-30 pointer-events-none"></div>
+
+               {/* Grid Renderizado */}
+               <div className="absolute inset-0 grid" style={{ gridTemplateColumns: `repeat(${MAP_W}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${MAP_H}, minmax(0, 1fr))` }}>
+                  {OFFICE_MAP.map((row, y) => row.map((cell, x) => {
+                     const isDark = darkMode;
+                     let cellStyle = {};
+                     let content = null;
+
+                     // Textura Base do Chão (Madeira Corrida Pixelada)
+                     const floorColor = isDark ? '#1e293b' : '#d4a373';
+                     const floorLine1 = isDark ? 'rgba(0,0,0,0.15)' : 'rgba(0,0,0,0.08)';
+                     const floorLine2 = isDark ? 'rgba(0,0,0,0.05)' : 'rgba(0,0,0,0.03)';
+                     const baseFloorStyle = {
+                        backgroundColor: floorColor,
+                        backgroundImage: `repeating-linear-gradient(90deg, transparent, transparent 19%, ${floorLine1} 19%, ${floorLine1} 20%), repeating-linear-gradient(0deg, transparent, transparent 19%, ${floorLine2} 19%, ${floorLine2} 20%)`
+                     };
+
+                     // Se for piso caminhável ou objeto em cima do piso
+                     if ([0, 2, 3, 4, 5, 6, 7, 8, 9].includes(cell)) {
+                         cellStyle = { ...baseFloorStyle };
+                     }
+
+                     // Estilos Específicos por Tile
+                     if (cell === 1) { 
+                         // Parede (Com Textura e Profundidade 3D)
+                         cellStyle = { 
+                            backgroundColor: isDark ? '#334155' : '#64748b', 
+                            backgroundImage: `repeating-linear-gradient(45deg, transparent, transparent 4px, rgba(0,0,0,0.1) 4px, rgba(0,0,0,0.1) 8px)`,
+                            boxShadow: `inset 0 4px 0 0 ${isDark ? '#475569' : '#94a3b8'}, inset 0 -6px 0 0 ${isDark ? '#0f172a' : '#334155'}`,
+                            zIndex: 10 
+                         };
+                     } else if (cell === 3) { 
+                         // Tapete Sala Admin
+                         cellStyle = { 
+                            backgroundColor: isDark ? '#312e81' : '#c7d2fe', 
+                            backgroundImage: `repeating-linear-gradient(45deg, transparent, transparent 20%, rgba(0,0,0,0.08) 20%, rgba(0,0,0,0.08) 40%)` 
+                         };
+                     } else if (cell === 2) { 
+                         // Mesa com PC (Pixelada)
+                         content = (
+                            <div className="absolute inset-[10%] bg-[#fbbf24] border-b-[4px] border-[#d97706] rounded-[2px] shadow-lg flex items-center justify-center">
+                                {/* Monitor */}
+                                <div className="absolute top-[10%] w-[40%] h-[40%] bg-slate-800 border-[1px] border-slate-900 rounded-[1px] flex flex-col items-center justify-center overflow-hidden p-[2px]">
+                                    <div className="w-full h-full bg-sky-400">
+                                      <div className="w-[80%] h-[20%] bg-white/50 mt-[5%] ml-[5%]"></div>
+                                      <div className="w-[50%] h-[20%] bg-white/50 mt-[10%] ml-[5%]"></div>
+                                    </div>
+                                </div>
+                                {/* Teclado */}
+                                <div className="absolute bottom-[15%] w-[30%] h-[15%] bg-white/90 rounded-[1px] shadow-sm"></div>
+                            </div>
+                         );
+                     } else if (cell === 5) { 
+                         // Mesa de Reunião (Madeira Maciça)
+                         content = <div className="absolute inset-0 bg-[#78350f] border-b-[4px] border-[#451a03] shadow-md z-0"></div>;
+                     } else if (cell === 7) { 
+                         // Balcão de Receção
+                         content = (
+                            <div className="absolute inset-[5%] bg-sky-500 border-b-[4px] border-sky-700 rounded-[4px] shadow-xl flex items-center justify-center z-10">
+                                <div className="w-[60%] h-[20%] bg-slate-100 rounded-[1px] shadow-sm"></div>
+                            </div>
+                         );
+                     } else if (cell === 8) { 
+                         // Cadeira Gamer/Office (Você pisa nela)
+                         content = (
+                            <div className="absolute w-[40%] h-[50%] bg-slate-700 border-b-[3px] border-slate-900 rounded-t-[4px] shadow-md flex items-end justify-center z-0">
+                                <div className="w-[20%] h-[30%] bg-slate-950"></div>
+                            </div>
+                         );
+                     } else if (cell === 4) { 
+                         // Planta Decorativa Pixelada
+                         content = (
+                            <div className="absolute w-[80%] h-[80%] flex items-center justify-center z-10">
+                                <div className="absolute bottom-0 w-[50%] h-[40%] bg-amber-800 border-b-[2px] border-amber-950 rounded-b-[4px]"></div>
+                                <div className="absolute top-[10%] w-[80%] h-[80%] bg-emerald-500 rounded-sm shadow-[inset_-2px_-2px_0_rgba(0,0,0,0.2)]"></div>
+                                <div className="absolute top-[20%] right-[10%] w-[60%] h-[60%] bg-emerald-400 rounded-sm shadow-[inset_-2px_-2px_0_rgba(0,0,0,0.2)]"></div>
+                            </div>
+                         );
+                     } else if (cell === 6) { 
+                         // Sofá Vermelho
+                         content = (
+                            <div className="absolute inset-[10%] bg-rose-500 border-b-[4px] border-rose-700 rounded-[4px] shadow-md flex items-center justify-between px-[5%] z-0">
+                                <div className="w-[15%] h-full bg-rose-400 rounded-sm"></div>
+                                <div className="w-[15%] h-full bg-rose-400 rounded-sm"></div>
+                            </div>
+                         );
+                     } else if (cell === 9) { 
+                         // Máquina de Água/Arcade
+                         content = (
+                            <div className="absolute inset-[10%] bg-slate-800 border-b-[4px] border-slate-950 rounded-[2px] shadow-lg flex flex-col items-center justify-start p-[5%] z-10">
+                                <div className="w-[80%] h-[40%] bg-blue-400 rounded-[1px] border-b-[2px] border-blue-600 animate-pulse"></div>
+                                <div className="w-[40%] h-[10%] bg-red-500 mt-[15%] rounded-full shadow-[0_0_5px_rgba(239,68,68,0.8)]"></div>
+                            </div>
+                         );
+                     }
+
+                     return <div key={`cell-${x}-${y}`} className="relative flex items-center justify-center" style={cellStyle}>{content}</div>
+                  }))}
+               </div>
+
+               {/* Nomes das Zonas Pintados no Chão */}
+               <div className="absolute inset-0 pointer-events-none overflow-hidden mix-blend-overlay opacity-30 dark:opacity-20 flex flex-col justify-between p-[5%] z-10">
+                  <div className="font-black text-2xl sm:text-5xl uppercase tracking-[0.5em] ml-[15%] mt-[5%] text-slate-900 font-mono" style={{ textShadow: '2px 2px 0px rgba(255,255,255,0.5)' }}>Admin</div>
+                  <div className="font-black text-2xl sm:text-5xl uppercase tracking-[0.5em] text-center text-slate-900 font-mono" style={{ textShadow: '2px 2px 0px rgba(255,255,255,0.5)' }}>Atendimento</div>
+                  <div className="font-black text-2xl sm:text-5xl uppercase tracking-[0.5em] text-center mb-[2%] text-slate-900 font-mono" style={{ textShadow: '2px 2px 0px rgba(255,255,255,0.5)' }}>Receção</div>
+               </div>
+
+               {/* Desenhar os Jogadores (Avatares RPG COM CORPO) */}
+               {playersToRender.map(p => (
+                 <div key={p.id} 
+                      className={`absolute flex flex-col items-center justify-end transition-all duration-200 ease-linear ${p.isMe ? 'z-50' : 'z-40'}`}
+                      style={{ 
+                        left: `${(p.x / MAP_W) * 100}%`, 
+                        top: `${(p.y / MAP_H) * 100}%`,
+                        width: `${100 / MAP_W}%`,
+                        height: `${100 / MAP_H}%`,
+                        transform: 'translate(-50%, -100%)', // O boneco "fica de pé" no centro do tile
+                        zIndex: p.y + 20 // Profundidade 3D
+                      }}>
+                    
+                    {/* NameTag RPG Style */}
+                    <div className="absolute -top-4 sm:-top-5 bg-slate-950 text-white text-[8px] sm:text-[10px] px-2 py-0.5 rounded-[4px] font-bold whitespace-nowrap shadow-md border-b-2 border-slate-700 pointer-events-none z-30">
+                      {p.nome.split(' ')[0]}
+                    </div>
+                    
+                    {/* Sprite do Boneco Completo */}
+                    <div className={`w-8 h-12 sm:w-10 sm:h-14 relative flex flex-col items-center justify-end ${p.isMe ? 'scale-110 drop-shadow-[0_0_10px_rgba(255,255,255,0.6)]' : ''}`}>
+                       {/* Sombra Dinâmica no chão */}
+                       <div className="w-[70%] h-[10%] bg-black/50 rounded-[100%] absolute bottom-[-5%] blur-[1px] z-0"></div>
+                       
+                       {/* Cabeça (Dicebear) */}
+                       <div className="w-[120%] h-[65%] relative z-20 flex justify-center -mb-[5%]">
+                          <img 
+                             src={`https://api.dicebear.com/7.x/pixel-art/svg?seed=${p.nome}&backgroundColor=transparent`} 
+                             alt={p.nome}
+                             className={`w-full h-full object-contain pointer-events-none drop-shadow-md ${p.isMe ? 'animate-pulse' : ''}`}
+                             style={{ imageRendering: 'pixelated', animationDuration: '2s' }}
+                          />
+                       </div>
+
+                       {/* Corpo (CSS Pixel Art) */}
+                       <div className="w-[60%] h-[35%] flex flex-col items-center z-10">
+                          {/* Tronco */}
+                          <div className={`w-full h-[65%] border-[2px] border-slate-900 rounded-t-[3px] ${p.perfil === 'admin' ? 'bg-amber-500' : 'bg-indigo-500'} flex justify-center relative overflow-hidden shadow-[inset_0_-2px_0_rgba(0,0,0,0.2)]`}>
+                             {/* Gravata / Fecho da camisa */}
+                             <div className="w-[20%] h-full bg-slate-900/20"></div>
+                          </div>
+                          {/* Pernas */}
+                          <div className="w-[80%] h-[35%] flex justify-between">
+                             <div className="w-[40%] h-full bg-slate-800 border-x border-b border-slate-950 rounded-b-[2px]"></div>
+                             <div className="w-[40%] h-full bg-slate-800 border-x border-b border-slate-950 rounded-b-[2px]"></div>
+                          </div>
+                       </div>
+                    </div>
+                 </div>
+               ))}
+            </div>
+
+            {/* D-PAD PARA MOBILE */}
+            <div className="mt-8 grid grid-cols-3 gap-2 sm:hidden w-full max-w-[200px]">
+               <div></div>
+               <button onClick={(e) => { e.preventDefault(); window.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowUp'})); }} className={`p-4 rounded-2xl flex justify-center items-center active:scale-90 transition-transform shadow-md ${darkMode ? 'bg-slate-800 text-white' : 'bg-slate-200 text-slate-800'}`}><ChevronLeft className="rotate-90" /></button>
+               <div></div>
+               <button onClick={(e) => { e.preventDefault(); window.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowLeft'})); }} className={`p-4 rounded-2xl flex justify-center items-center active:scale-90 transition-transform shadow-md ${darkMode ? 'bg-slate-800 text-white' : 'bg-slate-200 text-slate-800'}`}><ChevronLeft /></button>
+               <button onClick={(e) => { e.preventDefault(); window.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowDown'})); }} className={`p-4 rounded-2xl flex justify-center items-center active:scale-90 transition-transform shadow-md ${darkMode ? 'bg-slate-800 text-white' : 'bg-slate-200 text-slate-800'}`}><ChevronLeft className="-rotate-90" /></button>
+               <button onClick={(e) => { e.preventDefault(); window.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowRight'})); }} className={`p-4 rounded-2xl flex justify-center items-center active:scale-90 transition-transform shadow-md ${darkMode ? 'bg-slate-800 text-white' : 'bg-slate-200 text-slate-800'}`}><ChevronRight /></button>
+            </div>
+            
+            {!app && (
+              <div className="mt-6 text-xs sm:text-sm font-bold text-slate-400 flex items-center justify-center gap-2">
+                 <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div> Modo Local (Offline)
+              </div>
+            )}
           </div>
         )}
 
-        <div className="flex flex-col md:flex-row gap-3 sm:gap-4 justify-between items-stretch bg-transparent w-full">
-          
-          <div className={`flex items-center justify-between gap-1 sm:gap-2 p-1.5 sm:p-2 rounded-2xl w-full md:w-auto transition-opacity duration-300 ${isSearching ? 'opacity-30 pointer-events-none' : 'opacity-100'} ${darkMode ? 'bg-slate-900 border border-slate-800' : 'bg-white border border-slate-200 shadow-sm'}`}>
-            <button onClick={() => shiftDate(-1)} className={`p-2 sm:p-3 rounded-xl shrink-0 transition-colors ${darkMode ? 'hover:bg-slate-800 text-slate-400' : 'hover:bg-slate-100 text-slate-600'}`}>
-              <ChevronLeft size={20} className="sm:w-6 sm:h-6" />
-            </button>
-            
-            <div className="flex-1 text-center flex flex-col justify-center min-w-[100px] sm:min-w-[140px] relative">
-              <span className={`text-[10px] sm:text-xs font-bold uppercase tracking-widest mb-0.5 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>Exibindo</span>
-              <div className="flex items-center justify-center gap-1.5 sm:gap-2">
-                 <span className={`font-black text-sm sm:text-lg ${darkMode ? 'text-white' : 'text-slate-800'}`}>{getDisplayDateLabel()}</span>
-                 <label className="cursor-pointer relative overflow-hidden group shrink-0">
-                   <CalendarDays size={16} className={`sm:w-5 sm:h-5 transition-colors ${darkMode ? 'text-indigo-400 group-hover:text-indigo-300' : 'text-indigo-600 group-hover:text-indigo-800'}`} />
-                   <input type="date" value={activeDate} onChange={e => setActiveDate(e.target.value)} className="absolute top-0 left-0 w-full h-full opacity-0 cursor-pointer" />
-                 </label>
+        {/* --- LÓGICA EXISTENTE: LISTAGENS E BARRAS DE PESQUISA --- */}
+        {view !== 'office' && (
+          <>
+            {rescheduleData.active && (
+              <div className={`p-4 sm:p-5 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-lg animate-in slide-in-from-top-4 ${darkMode ? 'bg-indigo-900/40 border border-indigo-500/30' : 'bg-indigo-50 border border-indigo-200'}`}>
+                 <div className="flex items-center gap-3 sm:gap-4">
+                    <div className={`p-2 rounded-full shrink-0 ${darkMode ? 'bg-indigo-500/20 text-indigo-400' : 'bg-indigo-200 text-indigo-700'}`}>
+                      <Info size={20} />
+                    </div>
+                    <div>
+                      <p className={`text-[10px] sm:text-xs font-bold uppercase tracking-widest ${darkMode ? 'text-indigo-400' : 'text-indigo-600'}`}>Modo Remarcação</p>
+                      <p className={`font-semibold text-xs sm:text-sm ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
+                        Escolha a nova vaga para <strong className="font-black">{rescheduleData.oldName || rescheduleData.oldEmail}</strong>
+                      </p>
+                    </div>
+                 </div>
+                 <button onClick={() => setRescheduleData({active: false, eventId: null, oldName: '', oldEmail: '', oldPhone: ''})} className={`px-4 sm:px-6 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-colors w-full sm:w-auto shadow-sm ${darkMode ? 'bg-slate-800 text-slate-300 hover:bg-slate-700' : 'bg-white text-slate-700 hover:bg-slate-50'}`}>
+                   Cancelar
+                 </button>
+              </div>
+            )}
+
+            <div className="flex flex-col md:flex-row gap-3 sm:gap-4 justify-between items-stretch bg-transparent w-full">
+              <div className={`flex items-center justify-between gap-1 sm:gap-2 p-1.5 sm:p-2 rounded-2xl w-full md:w-auto transition-opacity duration-300 ${isSearching ? 'opacity-30 pointer-events-none' : 'opacity-100'} ${darkMode ? 'bg-slate-900 border border-slate-800' : 'bg-white border border-slate-200 shadow-sm'}`}>
+                <button onClick={() => shiftDate(-1)} className={`p-2 sm:p-3 rounded-xl shrink-0 transition-colors ${darkMode ? 'hover:bg-slate-800 text-slate-400' : 'hover:bg-slate-100 text-slate-600'}`}>
+                  <ChevronLeft size={20} className="sm:w-6 sm:h-6" />
+                </button>
+                <div className="flex-1 text-center flex flex-col justify-center min-w-[100px] sm:min-w-[140px] relative">
+                  <span className={`text-[10px] sm:text-xs font-bold uppercase tracking-widest mb-0.5 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>Exibindo</span>
+                  <div className="flex items-center justify-center gap-1.5 sm:gap-2">
+                     <span className={`font-black text-sm sm:text-lg ${darkMode ? 'text-white' : 'text-slate-800'}`}>{getDisplayDateLabel()}</span>
+                     <label className="cursor-pointer relative overflow-hidden group shrink-0">
+                       <CalendarDays size={16} className={`sm:w-5 sm:h-5 transition-colors ${darkMode ? 'text-indigo-400 group-hover:text-indigo-300' : 'text-indigo-600 group-hover:text-indigo-800'}`} />
+                       <input type="date" value={activeDate} onChange={e => setActiveDate(e.target.value)} className="absolute top-0 left-0 w-full h-full opacity-0 cursor-pointer" />
+                     </label>
+                  </div>
+                </div>
+                <button onClick={() => shiftDate(1)} className={`p-2 sm:p-3 rounded-xl shrink-0 transition-colors ${darkMode ? 'hover:bg-slate-800 text-slate-400' : 'hover:bg-slate-100 text-slate-600'}`}>
+                  <ChevronRight size={20} className="sm:w-6 sm:h-6" />
+                </button>
+                {activeDate !== todayStr && (
+                  <button onClick={() => setActiveDate(todayStr)} className={`shrink-0 ml-1 sm:ml-2 px-3 sm:px-4 py-2 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-widest transition-colors ${darkMode ? 'bg-indigo-900/40 text-indigo-400 hover:bg-indigo-900/60' : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'}`}>Hoje</button>
+                )}
+              </div>
+
+              <div className="flex gap-2 sm:gap-3 w-full md:w-auto flex-1 lg:max-w-md">
+                <div className="relative flex-1 min-w-0">
+                  <Search className={`absolute left-3 sm:left-4 top-1/2 -translate-y-1/2 w-4 h-4 sm:w-5 sm:h-5 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`} />
+                  <input placeholder={`Buscar pessoa...`} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className={`w-full pl-10 sm:pl-12 pr-3 sm:pr-4 py-3 sm:py-4 rounded-xl sm:rounded-2xl border text-xs sm:text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-900 border-slate-800 text-white placeholder-slate-500 focus:border-indigo-500' : 'bg-white border-slate-200 text-slate-800 focus:border-indigo-400 shadow-sm'}`} />
+                </div>
+                {view === 'sheets' && isAdmin && (
+                  <button onClick={() => setIsSlotModalOpen(true)} className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 sm:px-5 py-3 sm:py-4 rounded-xl sm:rounded-2xl font-bold text-sm shadow-lg shadow-indigo-600/30 transition-all flex items-center justify-center gap-2 whitespace-nowrap shrink-0 active:scale-95">
+                    <Plus size={20} strokeWidth={3} /> <span className="hidden sm:inline">Gerar Vagas</span>
+                  </button>
+                )}
               </div>
             </div>
-
-            <button onClick={() => shiftDate(1)} className={`p-2 sm:p-3 rounded-xl shrink-0 transition-colors ${darkMode ? 'hover:bg-slate-800 text-slate-400' : 'hover:bg-slate-100 text-slate-600'}`}>
-              <ChevronRight size={20} className="sm:w-6 sm:h-6" />
-            </button>
-            
-            {activeDate !== todayStr && (
-              <button onClick={() => setActiveDate(todayStr)} className={`shrink-0 ml-1 sm:ml-2 px-3 sm:px-4 py-2 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-widest transition-colors ${darkMode ? 'bg-indigo-900/40 text-indigo-400 hover:bg-indigo-900/60' : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'}`}>
-                Hoje
-              </button>
-            )}
-          </div>
-
-          <div className="flex gap-2 sm:gap-3 w-full md:w-auto flex-1 lg:max-w-md">
-            <div className="relative flex-1 min-w-0">
-              <Search className={`absolute left-3 sm:left-4 top-1/2 -translate-y-1/2 w-4 h-4 sm:w-5 sm:h-5 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`} />
-              <input placeholder={`Buscar pessoa...`} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} 
-                     className={`w-full pl-10 sm:pl-12 pr-3 sm:pr-4 py-3 sm:py-4 rounded-xl sm:rounded-2xl border text-xs sm:text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-900 border-slate-800 text-white placeholder-slate-500 focus:border-indigo-500' : 'bg-white border-slate-200 text-slate-800 focus:border-indigo-400 shadow-sm'}`} />
-            </div>
-            
-            {view === 'sheets' && isAdmin && (
-              <button onClick={() => setIsSlotModalOpen(true)} className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 sm:px-5 py-3 sm:py-4 rounded-xl sm:rounded-2xl font-bold text-sm shadow-lg shadow-indigo-600/30 transition-all flex items-center justify-center gap-2 whitespace-nowrap shrink-0 active:scale-95">
-                <Plus size={20} strokeWidth={3} /> <span className="hidden sm:inline">Gerar Vagas</span>
-              </button>
-            )}
-          </div>
-        </div>
+          </>
+        )}
 
         {view === 'sheets' && (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-5">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-5 mt-6">
             {filteredSlots.length === 0 && !loading && (
                <div className="col-span-full text-center py-16 sm:py-20 animate-in fade-in">
                  <FileText size={48} className={`mx-auto mb-4 sm:w-14 sm:h-14 ${darkMode ? 'text-slate-800' : 'text-slate-200'}`} />
@@ -805,16 +809,13 @@ export default function App() {
             {filteredSlots.map((slot, index) => {
               const isLivre = slot?.status === 'Livre';
               const isPendente = slot?.status === 'Pendente Exclusão';
-              
               const contactInfo = String(slot.contato_cliente || '');
               const [emailSlot, phoneSlot] = contactInfo.includes('|') ? contactInfo.split('|').map(s => s.trim()) : [contactInfo, ''];
 
               return (
                 <div key={slot?.id ? String(slot.id) : `slot-${index}`} className={`rounded-2xl sm:rounded-3xl p-5 sm:p-6 border relative transition-all duration-300 group overflow-hidden ${darkMode ? 'bg-slate-900 border-slate-800 hover:border-slate-700' : 'bg-white border-slate-200 shadow-sm hover:shadow-lg'} ${isPendente ? (darkMode ? 'border-red-900/50 shadow-[0_0_15px_rgba(239,68,68,0.1)]' : 'border-red-200 shadow-red-500/10') : ''}`}>
                   
-                  {isPendente && (
-                     <div className="absolute top-0 left-0 w-full h-1 bg-red-500"></div>
-                  )}
+                  {isPendente && <div className="absolute top-0 left-0 w-full h-1 bg-red-500"></div>}
 
                   <div className="flex justify-between items-start mb-4 sm:mb-5">
                     <div className="flex items-center gap-2 sm:gap-3">
@@ -850,11 +851,7 @@ export default function App() {
                         <span className="truncate">{String(slot?.atendente || slot?.Atendente || 'Balcão')}</span>
                       </div>
                       {isAdmin && (
-                        <button 
-                          onClick={() => setEditAtendenteModal({ isOpen: true, slotId: slot.id, currentName: String(slot?.atendente || slot?.Atendente || '') })}
-                          className={`p-1.5 rounded-lg opacity-100 sm:opacity-0 sm:group-hover/atendente:opacity-100 transition-all ${darkMode ? 'bg-slate-800 text-indigo-400 hover:bg-slate-700' : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'}`}
-                          title="Alterar Atendente"
-                        >
+                        <button onClick={() => setEditAtendenteModal({ isOpen: true, slotId: slot.id, currentName: String(slot?.atendente || slot?.Atendente || '') })} className={`p-1.5 rounded-lg opacity-100 sm:opacity-0 sm:group-hover/atendente:opacity-100 transition-all ${darkMode ? 'bg-slate-800 text-indigo-400 hover:bg-slate-700' : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'}`} title="Alterar Atendente">
                           <Pencil size={14} className="sm:w-4 sm:h-4" />
                         </button>
                       )}
@@ -906,7 +903,7 @@ export default function App() {
         )}
 
         {view === 'calendar' && (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-5">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-5 mt-6">
             {filteredEvents.length === 0 && !loading && (
                <div className="col-span-full text-center py-16 sm:py-20 animate-in fade-in">
                  <Calendar size={48} className={`mx-auto mb-4 sm:w-14 sm:h-14 ${darkMode ? 'text-slate-800' : 'text-slate-200'}`} />
@@ -922,7 +919,6 @@ export default function App() {
 
               const eventDateStr = event.start?.dateTime ? String(event.start.dateTime).split('T')[0] : String(event.start?.date);
               
-              // Busca vaga para saber se está pendente de exclusão
               const associatedSlot = safeSlots.find(s => {
                 if (!s.contato_cliente || (details.email === 'Não informado' && details.nome === '')) return false;
                 if (s.status !== 'Ocupado' && s.status !== 'Pendente Exclusão') return false;
@@ -959,7 +955,6 @@ export default function App() {
                   </div>
                   
                   <div className="space-y-2.5 sm:space-y-3 mt-4 sm:mt-5 pl-3 sm:pl-4">
-                    {/* Exibe o Atendente extraído dos Detalhes (criado agora no Google Calendar) */}
                     {details.atendente && details.atendente !== 'Não informado' && (
                       <div className={`flex items-center justify-between group/atendente pb-2 mb-2 border-b border-dashed ${darkMode ? 'border-slate-800' : 'border-slate-200'}`}>
                         <div className={`flex items-center gap-2 sm:gap-3 font-bold text-xs sm:text-sm ${darkMode ? 'text-indigo-300' : 'text-indigo-700'}`}>
@@ -990,7 +985,6 @@ export default function App() {
                     )}
                   </div>
                   
-                  {/* Exibe QUEM agendou no rodapé */}
                   {details.usuario && details.usuario !== 'Não informado' && (
                      <div className={`mt-4 pt-3 border-t ${darkMode ? 'border-slate-800' : 'border-slate-100'} pl-3 sm:pl-4`}>
                         <p className={`text-[10px] font-bold uppercase tracking-widest ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>Agendado por: <span className={darkMode ? 'text-slate-300' : 'text-slate-600'}>{details.usuario}</span></p>
@@ -1287,7 +1281,6 @@ export default function App() {
       {deleteConfirm.isOpen && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
           <div className={`w-full max-w-sm p-6 sm:p-8 rounded-[2rem] shadow-2xl text-center animate-in zoom-in-95 duration-200 border max-h-[90vh] overflow-y-auto ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-white'}`}>
-            
             {deleteConfirm.type === 'event' ? (
               <>
                 <div className={`p-4 sm:p-5 rounded-full inline-block mb-4 sm:mb-6 ${darkMode ? (isAdmin ? 'bg-red-500/20 text-red-400' : 'bg-orange-500/20 text-orange-400') : (isAdmin ? 'bg-red-100 text-red-600' : 'bg-orange-100 text-orange-600')}`}>
