@@ -13,7 +13,6 @@ import { getAuth, signInAnonymously, onAuthStateChanged, signOut } from 'firebas
 import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc } from 'firebase/firestore';
 
 // --- CONFIGURAÇÃO FIREBASE (MULTIPLAYER) ---
-// 🔴 ATENÇÃO: Cole as chaves do seu projeto Firebase nas strings abaixo.
 const FIREBASE_CONFIG = {
   apiKey: "AIzaSyBqZsc1aPe7-b_f9yXHvpEdWe6BYnjDvGw",
   authDomain: "ouvidoria-juizados.firebaseapp.com",
@@ -25,14 +24,11 @@ const FIREBASE_CONFIG = {
 
 let app = null, auth = null, db = null, appId = 'escritorio-ouvidoria-tjrr';
 try {
-  // 1º Tenta usar a sua configuração manual (Se preencheu a apiKey)
-  if (FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey !== "COLE_AQUI_API_KEY") {
+  if (FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey.length > 10) {
     app = initializeApp(FIREBASE_CONFIG);
     auth = getAuth(app);
     db = getFirestore(app);
-  } 
-  // 2º Fallback mágico para testes
-  else if (typeof __firebase_config !== 'undefined') {
+  } else if (typeof __firebase_config !== 'undefined') {
     const fallbackConfig = JSON.parse(__firebase_config);
     app = initializeApp(fallbackConfig);
     auth = getAuth(app);
@@ -47,17 +43,6 @@ try {
 const WEBHOOK_URL = "https://n8n-ouvidoria.tjrr.jus.br/webhook/calendar-api";
 
 // --- MAPA DO ESCRITÓRIO VIRTUAL (RPG PIXEL ART 16-BITS) ---
-// Legenda de Tiles:
-// 0: Chão Madeira
-// 1: Parede (Sólida)
-// 2: Mesa com Computador (Bloqueia)
-// 3: Tapete Sala Administração
-// 4: Vaso de Planta (Bloqueia)
-// 5: Mesa Reunião (Madeira Escura) (Bloqueia)
-// 6: Sofá Vermelho (Caminhável/Sentável)
-// 7: Balcão Receção (Bloqueia)
-// 8: Cadeira de Escritório (Caminhável/Sentável)
-// 9: Máquina de Água/Arcade (Bloqueia)
 const OFFICE_MAP = [
   [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
   [1,3,3,3,1,0,0,2,2,0,0,2,2,0,0,5,5,5,5,5,0,9,1],
@@ -75,7 +60,7 @@ const OFFICE_MAP = [
 const MAP_H = OFFICE_MAP.length;
 const MAP_W = OFFICE_MAP[0].length;
 
-// --- HELPERS ---
+// --- HELPERS E PROTEÇÕES ---
 function toRFC3339WithLocalOffset(date) {
   try {
     if (!date || isNaN(date.getTime())) return new Date().toISOString();
@@ -113,16 +98,22 @@ const WEEKDAYS = [
 ];
 
 export default function App() {
+  // === SISTEMA DE AUTENTICAÇÃO ===
   const [authUser, setAuthUser] = useState(() => {
     try { const saved = localStorage.getItem('ouvidoria_user'); return saved ? JSON.parse(saved) : null; } 
     catch { return null; }
   });
   
-  const [loginForm, setLoginForm] = useState({ email: '', senha: '' });
+  const [loginForm, setLoginForm] = useState({ matricula: '', senha: '' });
   const [isLoggingIn, setIsLoggingIn] = useState(false);
-  const isAdmin = authUser?.perfil?.toLowerCase() === 'admin' || String(authUser?.email).toLowerCase().includes('admin');
+  const isAdmin = authUser?.perfil?.toLowerCase() === 'admin';
 
-  // Padrão de ecrã inicial
+  // Modal Troca de Senha
+  const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
+  const [pwdForm, setPwdForm] = useState({ old: '', new: '', confirm: '' });
+  const [pwdLoading, setPwdLoading] = useState(false);
+
+  // === ESTADOS DA INTERFACE ===
   const [view, setView] = useState('sheets'); 
   const [events, setEvents] = useState([]);
   const [slots, setSlots] = useState([]);
@@ -147,10 +138,8 @@ export default function App() {
   const [newAtendente, setNewAtendente] = useState('');
   const [progressData, setProgressData] = useState({ active: false, current: 0, total: 0, message: '' });
 
-  // === ESTADOS DO ESCRITÓRIO VIRTUAL ===
   const [onlinePlayers, setOnlinePlayers] = useState([]);
   const [myPos, setMyPos] = useState({ x: 10, y: 9 }); 
-  const [facing, setFacing] = useState('down'); 
 
   const safeEvents = Array.isArray(events) ? events : [];
   const safeSlots = Array.isArray(slots) ? slots : [];
@@ -158,7 +147,6 @@ export default function App() {
 
   // === MULTIPLAYER E MOVIMENTO ===
   useEffect(() => {
-    // Sincronização ligada para todos os utilizadores
     if (!authUser) return;
     let unsub = () => {};
     let intervalId;
@@ -170,7 +158,7 @@ export default function App() {
           const myUid = auth.currentUser.uid;
           const myDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'office_users', myUid);
           
-          await setDoc(myDocRef, { nome: authUser.nome || authUser.email, perfil: isAdmin ? 'admin' : 'user', x: myPos.x, y: myPos.y, lastActive: Date.now() }, { merge: true });
+          await setDoc(myDocRef, { nome: authUser.nome || authUser.matricula || 'Visitante', perfil: isAdmin ? 'admin' : 'user', x: myPos.x, y: myPos.y, lastActive: Date.now() }, { merge: true });
 
           const usersRef = collection(db, 'artifacts', appId, 'public', 'data', 'office_users');
           unsub = onSnapshot(usersRef, (snapshot) => {
@@ -204,14 +192,13 @@ export default function App() {
           let nx = prev.x;
           let ny = prev.y;
           
-          if (['ArrowUp', 'w', 'W'].includes(e.key)) { ny -= 1; setFacing('up'); }
-          else if (['ArrowDown', 's', 'S'].includes(e.key)) { ny += 1; setFacing('down'); }
-          else if (['ArrowLeft', 'a', 'A'].includes(e.key)) { nx -= 1; setFacing('left'); }
-          else if (['ArrowRight', 'd', 'D'].includes(e.key)) { nx += 1; setFacing('right'); }
+          if (['ArrowUp', 'w', 'W'].includes(e.key)) { ny -= 1; }
+          else if (['ArrowDown', 's', 'S'].includes(e.key)) { ny += 1; }
+          else if (['ArrowLeft', 'a', 'A'].includes(e.key)) { nx -= 1; }
+          else if (['ArrowRight', 'd', 'D'].includes(e.key)) { nx += 1; }
 
           if (ny >= 0 && ny < MAP_H && nx >= 0 && nx < MAP_W) {
             const tile = OFFICE_MAP[ny][nx];
-            // Pisos caminháveis: 0(Madeira), 3(Tapete), 6(Sofá), 8(Cadeira)
             if ([0, 3, 6, 8].includes(tile)) { 
               if (app && auth?.currentUser && db) {
                 const myDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'office_users', auth.currentUser.uid);
@@ -230,10 +217,10 @@ export default function App() {
 
   const myUid = auth?.currentUser?.uid || 'local-user';
   const otherPlayers = onlinePlayers.filter(p => p.id !== myUid);
-  const meAsPlayer = { id: myUid, nome: authUser?.nome || authUser?.email || 'Eu', perfil: isAdmin ? 'admin' : 'user', x: myPos.x, y: myPos.y, isMe: true };
+  const meAsPlayer = { id: myUid, nome: authUser?.nome || authUser?.matricula || 'Eu', perfil: isAdmin ? 'admin' : 'user', x: myPos.x, y: myPos.y, isMe: true };
   const playersToRender = [...otherPlayers, meAsPlayer].sort((a,b) => a.y - b.y); 
 
-  // === FUNÇÕES CORE ===
+  // === FUNÇÕES CORE N8N ===
   const showToast = useCallback((message, type = 'success') => { setToast({ message: String(message), type }); setTimeout(() => setToast(null), 5000); }, []);
 
   const callN8N = useCallback(async (action, payload = {}) => {
@@ -243,7 +230,7 @@ export default function App() {
       const res = await fetch(WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, mode: 'cors', body: JSON.stringify({ action, ...payload }), signal: controller.signal });
       clearTimeout(timeoutId);
       const data = await res.json().catch(() => null);
-      if (res.status === 401) throw new Error("Acesso Negado. E-mail ou Senha incorretos."); 
+      if (res.status === 401) throw new Error("Acesso Negado. Matrícula ou Senha incorretos."); 
       if (!res.ok) {
         if (res.status === 409) throw new Error(data?.error || "Vaga indisponível ou em conflito.");
         throw new Error(data?.error || `Erro do Servidor (HTTP ${res.status}).`);
@@ -261,9 +248,9 @@ export default function App() {
 
   const handleLogin = async (e) => {
     e.preventDefault();
-    if (!loginForm.email || !loginForm.senha) return showToast("Preencha todos os campos.", "error");
+    if (!loginForm.matricula || !loginForm.senha) return showToast("Preencha todos os campos.", "error");
     setIsLoggingIn(true);
-    const res = await callN8N('login', { email: loginForm.email.trim(), senha: loginForm.senha });
+    const res = await callN8N('login', { matricula: loginForm.matricula.trim(), senha: loginForm.senha });
     setIsLoggingIn(false);
     if (res && res.ok) {
       setAuthUser(res.user); localStorage.setItem('ouvidoria_user', JSON.stringify(res.user)); showToast(`Bem-vindo(a), ${res.user.nome || 'Usuário'}!`, "success");
@@ -271,21 +258,31 @@ export default function App() {
   };
 
   const handleLogout = async () => { 
-    // Se o Firebase estiver ativo, remove o boneco do mapa e desloga do servidor
     if (auth?.currentUser && db) {
       try {
         await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'office_users', auth.currentUser.uid));
         await signOut(auth);
-      } catch (err) {
-        console.error("Erro ao remover avatar do servidor:", err);
-      }
+      } catch (err) {}
     }
-    
-    // Limpa a interface localmente
-    setAuthUser(null); 
-    localStorage.removeItem('ouvidoria_user'); 
-    setEvents([]); 
-    setSlots([]); 
+    setAuthUser(null); localStorage.removeItem('ouvidoria_user'); setEvents([]); setSlots([]); 
+  };
+
+  const handleChangePassword = async (e) => {
+    e.preventDefault();
+    if (pwdForm.new !== pwdForm.confirm) return showToast("As senhas novas não coincidem.", "error");
+    if (pwdForm.new.length < 4) return showToast("A nova senha deve ter pelo menos 4 caracteres.", "error");
+
+    setPwdLoading(true);
+    const res = await callN8N('change_password', { matricula: authUser.matricula, oldSenha: pwdForm.old, newSenha: pwdForm.new });
+    setPwdLoading(false);
+
+    if (res && res.ok) {
+      showToast("Senha alterada com sucesso!", "success");
+      setIsPasswordModalOpen(false);
+      setPwdForm({ old: '', new: '', confirm: '' });
+    } else {
+      showToast("Senha atual incorreta ou erro ao atualizar.", "error");
+    }
   };
 
   const fetchData = useCallback(async () => {
@@ -311,7 +308,7 @@ export default function App() {
 
   useEffect(() => { if (authUser) fetchData(); }, [fetchData, authUser]);
 
-  // --- LÓGICA DE AGENDAMENTO E DATAS ---
+  // --- LÓGICA DE AGENDAMENTO ---
   const shiftDate = (days) => { const d = new Date(activeDate + 'T12:00:00'); d.setDate(d.getDate() + days); setActiveDate(d.toISOString().split('T')[0]); };
   const getDisplayDateLabel = () => {
     if (activeDate === todayStr) return "Hoje";
@@ -319,8 +316,7 @@ export default function App() {
     const ontem = new Date(todayStr + 'T12:00:00'); ontem.setDate(ontem.getDate() - 1); if (activeDate === ontem.toISOString().split('T')[0]) return "Ontem";
     return new Date(activeDate + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' }).replace('.', '');
   };
-  const getSafeDateRender = (startObj) => { try { const s = startObj?.dateTime || startObj?.date; if (!s) return "Sem data definida"; const d = new Date(s); if (isNaN(d.getTime())) return "Data inválida"; return d.toLocaleString('pt-PT', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }); } catch { return "Erro"; } };
-
+  
   const handleOpenBookingModal = (slot) => { setSelectedSlotForBooking(slot); if (rescheduleData.active) { setFormData({ nome: rescheduleData.oldName, email: rescheduleData.oldEmail, telefone: rescheduleData.oldPhone, assunto: 'Remarcação' }); } else if (!formData.nome) { setFormData({ nome: '', email: '', telefone: '', assunto: '' }); } setIsModalOpen(true); };
 
   const handleSubmitBooking = async (e) => {
@@ -336,7 +332,7 @@ export default function App() {
     setSlots(prev => prev.map(s => s.id === selectedSlotForBooking.id ? { ...s, status: 'Ocupado', nome_cliente: formData.nome, contato_cliente: `${formData.email || ''} | ${formData.telefone}`, assunto: formData.assunto } : s));
     setIsModalOpen(false); setProgressData({ active: true, current: 0, total: 1, message: `A agendar ${formData.nome}...` });
 
-    const calResult = await callN8N('create', { inicio: toRFC3339WithLocalOffset(start), fim: toRFC3339WithLocalOffset(end), nome: formData.nome, email: formData.email || '', telefone: formData.telefone, assunto: formData.assunto, atendente: selectedSlotForBooking.atendente || selectedSlotForBooking.Atendente || 'Balcão', usuario: authUser.nome || authUser.email });
+    const calResult = await callN8N('create', { inicio: toRFC3339WithLocalOffset(start), fim: toRFC3339WithLocalOffset(end), nome: formData.nome, email: formData.email || '', telefone: formData.telefone, assunto: formData.assunto, atendente: selectedSlotForBooking.atendente || selectedSlotForBooking.Atendente || 'Balcão', usuario: authUser.nome || authUser.matricula });
     if (calResult) {
       const sheetResult = await callN8N('update_slot', { id: selectedSlotForBooking.id, data: selectedSlotForBooking.data || '', horario: selectedSlotForBooking.horario || '', atendente: selectedSlotForBooking.atendente || selectedSlotForBooking.Atendente || '', status: 'Ocupado', nome_cliente: formData.nome, contato_cliente: `${formData.email || 'Sem e-mail'} | ${formData.telefone}`, assunto: formData.assunto });
       if (sheetResult) {
@@ -353,41 +349,38 @@ export default function App() {
   };
 
   // --- SELETORES EM MASSA ---
-  const toggleTimeSelection = (time) => {
-    setSlotData(prev => ({
-      ...prev, 
-      times: prev.times.includes(time) ? prev.times.filter(t => t !== time) : [...prev.times, time].sort()
-    }));
-  };
+  const toggleTimeSelection = (time) => { setSlotData(prev => ({ ...prev, times: prev.times.includes(time) ? prev.times.filter(t => t !== time) : [...prev.times, time].sort() })); };
+  const toggleWeekday = (id) => { setSlotData(prev => ({ ...prev, weekdays: prev.weekdays.includes(id) ? prev.weekdays.filter(d => d !== id) : [...prev.weekdays, id] })); };
+  const handleAddAtendenteToMassSlot = () => { if (newAtendente.trim()) { if (!slotData.atendentes.includes(newAtendente.trim())) { setSlotData(p => ({...p, atendentes: [...p.atendentes, newAtendente.trim()]})); } setNewAtendente(''); } };
 
-  const toggleWeekday = (id) => {
-    setSlotData(prev => ({
-      ...prev,
-      weekdays: prev.weekdays.includes(id) ? prev.weekdays.filter(d => d !== id) : [...prev.weekdays, id]
-    }));
-  };
+  // Bloco Blindado contra falhas de Data
+  const getDatesInRange = useCallback((start, end, weekdays) => {
+    try {
+      if (!start) return [];
+      let current = new Date(start + 'T12:00:00');
+      const endDate = end ? new Date(end + 'T12:00:00') : current;
+      if (isNaN(current.getTime()) || isNaN(endDate.getTime())) return [];
 
-  const handleAddAtendenteToMassSlot = () => {
-    if (newAtendente.trim()) {
-      if (!slotData.atendentes.includes(newAtendente.trim())) {
-        setSlotData(p => ({...p, atendentes: [...p.atendentes, newAtendente.trim()]}));
+      const dates = [];
+      while (current <= endDate) {
+        if (weekdays.includes(current.getDay())) {
+          dates.push(current.toISOString().split('T')[0]);
+        }
+        current.setDate(current.getDate() + 1);
       }
-      setNewAtendente('');
+      return dates;
+    } catch(e) {
+      return [];
     }
-  };
+  }, []);
 
-  const getDatesInRange = (start, end, weekdays) => {
-    let current = new Date(start + 'T12:00:00');
-    const endDate = new Date(end + 'T12:00:00');
-    const dates = [];
-    while (current <= endDate) {
-      if (weekdays.includes(current.getDay())) {
-        dates.push(current.toISOString().split('T')[0]);
-      }
-      current.setDate(current.getDate() + 1);
-    }
-    return dates;
-  };
+  const getSlotPreviewCount = useCallback(() => {
+    try {
+      if (slotData.times.length === 0 || slotData.atendentes.length === 0) return 0;
+      const validDates = getDatesInRange(slotData.startDate, slotData.endDate, slotData.weekdays);
+      return slotData.times.length * slotData.atendentes.length * (validDates.length > 0 ? validDates.length : 1);
+    } catch(e) { return 0; }
+  }, [slotData, getDatesInRange]);
 
   const handleCreateMassSlots = async (e) => {
     e.preventDefault();
@@ -395,11 +388,8 @@ export default function App() {
     if (slotData.atendentes.length === 0) return showToast("Adicione pelo menos um atendente!", "error");
     if (slotData.times.length === 0) return showToast("Selecione pelo menos um horário!", "error");
     
-    const datesToProcess = slotData.endDate 
-      ? getDatesInRange(slotData.startDate, slotData.endDate, slotData.weekdays) 
-      : [slotData.startDate];
-
-    if (datesToProcess.length === 0) return showToast("Nenhum dia válido encontrado.", "error");
+    const datesToProcess = slotData.endDate ? getDatesInRange(slotData.startDate, slotData.endDate, slotData.weekdays) : [slotData.startDate];
+    if (datesToProcess.length === 0) return showToast("Nenhum dia válido encontrado na seleção.", "error");
     
     const totalTasks = datesToProcess.length * slotData.times.length * slotData.atendentes.length;
     let sucessos = 0;
@@ -531,16 +521,16 @@ export default function App() {
              </div>
              <h1 className="font-black text-3xl tracking-tight mb-2">Acesso Restrito</h1>
              <p className={`text-sm font-medium ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-               Faça login para gerir as vagas da Ouvidoria.
+               Faça login para gerir as vagas.
              </p>
           </div>
 
           <form onSubmit={handleLogin} className="space-y-6">
             <div>
-              <label className={`block text-xs font-bold uppercase tracking-widest mb-2 ml-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>E-mail do Utilizador</label>
+              <label className={`block text-xs font-bold uppercase tracking-widest mb-2 ml-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Matrícula do Utilizador</label>
               <div className="relative">
                 <User className={`absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`} />
-                <input required type="email" placeholder="admin@tjrr.jus.br" value={loginForm.email} onChange={e => setLoginForm({...loginForm, email: e.target.value})} className={`w-full pl-12 pr-4 py-4 rounded-2xl border text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-900 focus:border-indigo-500 focus:bg-white'}`} />
+                <input required type="text" placeholder="Ex: 3011304" value={loginForm.matricula} onChange={e => setLoginForm({...loginForm, matricula: e.target.value})} className={`w-full pl-12 pr-4 py-4 rounded-2xl border text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-900 focus:border-indigo-500 focus:bg-white'}`} />
               </div>
             </div>
             <div>
@@ -579,18 +569,21 @@ export default function App() {
             <div className="bg-gradient-to-br from-indigo-500 to-indigo-700 p-2 sm:p-3 rounded-xl sm:rounded-2xl text-white shadow-lg shadow-indigo-500/30">
               <Calendar className="w-5 h-5 sm:w-6 sm:h-6" strokeWidth={2.5} />
             </div>
-            <h1 className="font-black text-xl sm:text-2xl tracking-tight hidden min-[360px]:block">Agenda Descolada</h1>
+            <h1 className="font-black text-xl sm:text-2xl tracking-tight hidden min-[360px]:block">Agenda automática</h1>
           </div>
           
           <div className="flex items-center gap-1 sm:gap-2">
             <div className={`hidden md:flex items-center gap-2 px-4 py-2 rounded-xl mr-2 font-bold text-sm border ${darkMode ? 'bg-slate-900 border-slate-800 text-slate-300' : 'bg-white border-slate-200 text-slate-600 shadow-sm'}`}>
               <User size={16} className={isAdmin ? "text-amber-500" : "text-indigo-500"} />
               <span className="flex flex-col items-start leading-none">
-                <span>{authUser.nome || authUser.email}</span>
+                <span>{String(authUser.nome || authUser.matricula || '').split(' ')[0]}</span>
                 {isAdmin && <span className="text-[10px] text-amber-500 uppercase tracking-widest mt-0.5">Administrador</span>}
               </span>
             </div>
 
+            <button onClick={() => setIsPasswordModalOpen(true)} className={`p-2 sm:p-2.5 rounded-full transition-colors ${darkMode ? 'text-emerald-400 hover:bg-slate-800' : 'text-emerald-600 hover:bg-slate-100'}`} title="Alterar Senha">
+              <Key className="w-5 h-5 sm:w-6 sm:h-6" />
+            </button>
             <button onClick={() => {fetchData(); showToast("A atualizar...");}} className={`p-2 sm:p-2.5 rounded-full transition-colors ${darkMode ? 'text-slate-300 hover:bg-slate-800' : 'text-slate-500 hover:bg-slate-100'}`} title="Atualizar Dados">
               <RefreshCw className={`w-5 h-5 sm:w-6 sm:h-6 ${loading ? 'animate-spin text-indigo-500' : ''}`} />
             </button>
@@ -611,7 +604,6 @@ export default function App() {
           <button onClick={() => setView('calendar')} className={`flex-1 py-2.5 sm:py-3 text-[10px] sm:text-xs md:text-sm font-bold rounded-xl transition-all duration-300 flex items-center justify-center gap-1 sm:gap-2 ${view === 'calendar' ? (darkMode ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'bg-slate-800 text-white shadow-lg shadow-slate-800/20') : (darkMode ? 'bg-slate-900 text-slate-400 hover:bg-slate-800' : 'bg-slate-100 text-slate-500 hover:bg-slate-200')}`}>
              <Calendar size={16} /> Agendados
           </button>
-          
           <button onClick={() => setView('office')} className={`flex-1 py-2.5 sm:py-3 text-[10px] sm:text-xs md:text-sm font-bold rounded-xl transition-all duration-300 flex items-center justify-center gap-1 sm:gap-2 ${view === 'office' ? (darkMode ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20' : 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20') : (darkMode ? 'bg-slate-900 text-slate-400 hover:bg-slate-800' : 'bg-slate-100 text-slate-500 hover:bg-slate-200')}`}>
              <MonitorSmartphone size={16} /> Escritório Virtual
           </button>
@@ -631,7 +623,7 @@ export default function App() {
                </div>
                <div className="flex gap-4">
                   <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest"><div className="w-3 h-3 rounded-full bg-amber-500 border border-white"></div> Admins</div>
-                  <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest"><div className="w-3 h-3 rounded-full bg-indigo-500 border border-white"></div> Equipe</div>
+                  <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest"><div className="w-3 h-3 rounded-full bg-indigo-500 border border-white"></div> Equipa</div>
                </div>
             </div>
 
@@ -994,7 +986,7 @@ export default function App() {
                <div className="col-span-full text-center py-16 sm:py-20 animate-in fade-in">
                  <Calendar size={48} className={`mx-auto mb-4 sm:w-14 sm:h-14 ${darkMode ? 'text-slate-800' : 'text-slate-200'}`} />
                  <p className={`font-semibold text-base sm:text-lg ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
-                   {isSearching ? 'Nenhuma agendamento oficial encontrado.' : 'Agenda livre neste dia.'}
+                   {isSearching ? 'Nenhum agendamento oficial encontrado.' : 'Agenda livre neste dia.'}
                  </p>
                </div>
             )}
@@ -1176,6 +1168,36 @@ export default function App() {
         </div>
       )}
 
+      {/* MODAL: ALTERAR SENHA */}
+      {isPasswordModalOpen && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+          <div className={`w-full max-w-sm p-6 sm:p-8 rounded-[2rem] shadow-2xl animate-in zoom-in-95 duration-200 border ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-white'}`}>
+            <div className="flex justify-between items-center mb-6">
+              <h3 className={`font-black text-xl flex items-center gap-2 ${darkMode ? 'text-white' : 'text-slate-800'}`}><Key size={24} className="text-emerald-500"/> Alterar Senha</h3>
+              <button onClick={() => { setIsPasswordModalOpen(false); setPwdForm({old:'', new:'', confirm:''}); }} className={`p-2 rounded-full transition-colors ${darkMode ? 'bg-slate-800 text-slate-400 hover:text-white' : 'bg-slate-100 text-slate-500 hover:text-slate-800'}`}><X size={20}/></button>
+            </div>
+            <form onSubmit={handleChangePassword} className="space-y-4">
+              <div>
+                <label className={`block text-[10px] sm:text-xs font-bold uppercase mb-2 ml-1 tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Senha Atual</label>
+                <input required type="password" placeholder="••••••" className={`w-full px-4 py-3 rounded-xl border text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-emerald-500' : 'bg-slate-50 border-slate-200 text-slate-800 focus:border-emerald-500 focus:bg-white'}`} value={pwdForm.old} onChange={e => setPwdForm({...pwdForm, old: e.target.value})} />
+              </div>
+              <div>
+                <label className={`block text-[10px] sm:text-xs font-bold uppercase mb-2 ml-1 tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Nova Senha</label>
+                <input required type="password" placeholder="Mínimo 4 caracteres" className={`w-full px-4 py-3 rounded-xl border text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-emerald-500' : 'bg-slate-50 border-slate-200 text-slate-800 focus:border-emerald-500 focus:bg-white'}`} value={pwdForm.new} onChange={e => setPwdForm({...pwdForm, new: e.target.value})} />
+              </div>
+              <div>
+                <label className={`block text-[10px] sm:text-xs font-bold uppercase mb-2 ml-1 tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Confirmar Nova Senha</label>
+                <input required type="password" placeholder="Repita a nova senha" className={`w-full px-4 py-3 rounded-xl border text-sm font-semibold outline-none transition-all ${darkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-emerald-500' : 'bg-slate-50 border-slate-200 text-slate-800 focus:border-emerald-500 focus:bg-white'}`} value={pwdForm.confirm} onChange={e => setPwdForm({...pwdForm, confirm: e.target.value})} />
+              </div>
+              
+              <button disabled={pwdLoading} className="w-full bg-emerald-600 hover:bg-emerald-500 text-white py-3.5 rounded-xl font-black text-sm transition-all flex justify-center items-center gap-2 active:scale-95 disabled:opacity-50 mt-2 shadow-lg shadow-emerald-600/20">
+                {pwdLoading ? <Loader2 className="animate-spin" size={20} /> : 'Salvar Nova Senha'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* MODAL: EDITAR ATENDENTE */}
       {editAtendenteModal.isOpen && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
@@ -1308,7 +1330,7 @@ export default function App() {
               </div>
 
               <button disabled={loading || slotData.times.length === 0 || slotData.atendentes.length === 0} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-3 sm:py-4 rounded-xl sm:rounded-2xl font-black text-sm sm:text-lg mt-2 sm:mt-4 shadow-lg shadow-indigo-600/30 transition-all flex justify-center items-center gap-2 active:scale-95 disabled:opacity-50 disabled:active:scale-100">
-                {loading ? <Loader2 className="animate-spin" size={20} /> : `Gerar Vagas (${slotData.times.length * slotData.atendentes.length * (slotData.endDate ? getDatesInRange(slotData.startDate, slotData.endDate, slotData.weekdays).length : 1)} no total)`}
+                {loading ? <Loader2 className="animate-spin" size={20} /> : `Gerar Vagas (${getSlotPreviewCount()})`}
               </button>
             </form>
           </div>
